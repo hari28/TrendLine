@@ -224,13 +224,61 @@ only deliver within 24 hours of the recipient last messaging the business
 number (send it a WhatsApp message first to open that window, or use an
 approved Message Template for reliable unattended delivery).
 
+### Universe Digest — scanning everyone, not just your watchlist
+
+Separate from the per-symbol Watchlist above, `universe_digest.py` scans the
+**entire "All" universe** (Nifty 100 + Midcap 150 + Smallcap 250 combined,
+~500 stocks — scanning Large/Mid/Small separately as well would just be
+redundant, since All is their union) across **all four scan modes** (Above
+200 MA, Golden/Death Cross, Unusual Volume, Chart Patterns), and posts a
+Telegram digest of any stock that **newly** enters a qualifying condition.
+It runs automatically as part of the same `check_watchlist.py` job below —
+no separate install needed.
+
+Fixed configuration (matches the settings requested when this was built):
+EMA only (no SMA), Above-MA band 0–2%, minimum volume 500,000. `force_refresh`
+is deliberately **off** here — force-refreshing ~500 stocks across every
+timeframe on every 15-minute cycle would take far longer than 15 minutes to
+complete and risks Yahoo/NSE rate-limiting the whole app; the existing
+per-timeframe cache TTLs already keep data fresh enough for this cadence.
+
+To avoid re-scanning data that hasn't actually changed, each timeframe runs
+on its own cadence rather than all together every 15 minutes:
+- **15-Minute** combos: every cycle, during trading hours.
+- **1-Hour** combos: once per wall-clock hour, during trading hours.
+- **1-Day / 1-Week / 1-Month** combos: once per day, in a window shortly
+  after close (15:30–16:00 IST) — these three share a single daily data
+  fetch per symbol (1W/1M are resampled from the same daily bars), so this
+  isn't 3x the work it sounds like.
+
+Like the per-symbol Watchlist, the **first-ever check of each combo never
+alerts** — it just records a baseline, so you won't get a flood of "hits"
+covering everything already qualifying on first deploy. Only genuinely new
+matches after that fire an alert. State lives in
+`data/universe_digest_state.json`.
+
+**Cold-start expectation:** the very first cycle needs to fetch fresh data
+for ~500 stocks (across the 3 distinct underlying fetch types — 15-minute,
+hourly, and daily/weekly/monthly share one daily fetch) and can take
+significantly longer than 15 minutes to complete once. A file lock
+(`data/.check_watchlist.lock`) prevents a slow run from ever overlapping
+with the next scheduled one. This is macOS/POSIX-only (uses `fcntl`) — fine
+since it's only invoked by the launchd job below, not the cross-platform
+Streamlit app itself.
+
 ### Running checks in the background (launchd)
 
-The Streamlit app only checks the watchlist while it's open. To get alerts
-even when the app is closed (as long as your Mac is on), install the included
-launchd job — it runs `check_watchlist.py` every 15 minutes and skips itself
-outside NSE market hours (Mon–Fri, 9:15–15:30 IST), so it's harmless to leave
-loaded permanently.
+The Streamlit app only checks things while it's open. To get alerts even
+when the app is closed (as long as your Mac is on), install the included
+launchd job — it runs `check_watchlist.py` every 15 minutes, which handles
+both the per-symbol Watchlist check and the Universe Digest above (each
+self-gated to its own relevant hours), so it's harmless to leave loaded
+permanently.
+
+To change the 15-minute interval later: `launchctl unload` it, edit
+`StartInterval` (in seconds) in both `launchd/com.trendline.watchlist.plist`
+and the installed copy at `~/Library/LaunchAgents/com.trendline.watchlist.plist`,
+then `launchctl load` it again.
 
 ```bash
 cp ~/Documents/Claude_PRO/ma_screener/launchd/com.trendline.watchlist.plist ~/Library/LaunchAgents/
@@ -244,10 +292,13 @@ To stop it:
 launchctl unload ~/Library/LaunchAgents/com.trendline.watchlist.plist
 ```
 
-Logs: `data/watchlist_check.log` (one line per run — checked/triggered/sent/
-failed counts), plus `data/launchd_stdout.log` / `data/launchd_stderr.log` for
-anything the script itself printed or crashed on. None of these logs rotate —
-fine for a single-user local tool, but they'll grow unboundedly over time.
+Logs: `data/watchlist_check.log` (one line per run, covering both the
+per-symbol Watchlist and the Universe Digest — checked/triggered/sent/failed
+counts for the former, hits/alert_sent/which cadence buckets ran for the
+latter; either half shows "skipped" when outside its relevant hours), plus
+`data/launchd_stdout.log` / `data/launchd_stderr.log` for anything the script
+itself printed or crashed on. None of these logs rotate — fine for a
+single-user local tool, but they'll grow unboundedly over time.
 
 ## Notes
 

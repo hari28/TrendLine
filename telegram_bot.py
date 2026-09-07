@@ -19,17 +19,21 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 
-def send_telegram_message(text: str) -> bool:
+def send_telegram_message(text: str, parse_mode: str | None = None) -> bool:
     """Send a message to the configured Telegram chat/group via the Bot API.
     Never raises -- returns False on any failure (missing config, network
     error, non-2xx response) so a transient Telegram outage never breaks a
-    scan or watchlist check."""
+    scan or watchlist check. Pass parse_mode="HTML" for messages using HTML
+    tags (e.g. <pre> for monospace tables) -- plain alerts should leave it
+    unset."""
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         logger.warning("Telegram not configured (missing env vars) -- skipping alert: %s", text[:80])
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text[:4096]}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
         resp = requests.post(url, json=payload, timeout=15)
         if resp.status_code >= 400:

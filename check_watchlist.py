@@ -4,10 +4,22 @@ Streamlit process. Invoke with the venv's python, e.g.:
 
     venv/bin/python3 check_watchlist.py
 
-Runs one watchlist check-and-alert pass, gated to NSE market hours (IST,
-Mon-Fri 9:15-15:30) so it's harmless to leave the launchd job loaded
-permanently -- see README.md for the launchd plist and install steps.
+Runs two things, both gated to NSE-relevant hours (IST) so it's harmless to
+leave the launchd job loaded permanently -- see README.md "Watchlist Alerts"
+and "Universe Digest" for details:
+  1. The per-symbol Watchlist check (watchlist.py) -- only during live
+     trading hours (Mon-Fri 9:15-15:30).
+  2. The full-universe scan digest (universe_digest.py) -- during trading
+     hours for its 15-Minute/1-Hour combos, plus a short window after close
+     (15:30-16:00) for its once-daily 1D/1W/1M combos. It self-gates its own
+     cadence internally, so it's safe to call every cycle.
+
+A file lock prevents two invocations from ever running concurrently -- the
+first-ever universe digest cycle has to cold-fetch ~500 stocks and can take
+longer than the 15-minute launchd interval, and overlapping runs could race
+on the shared state JSON files.
 """
+import fcntl
 import os
 import sys
 from datetime import datetime, time as dtime
@@ -20,16 +32,27 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 import watchlist
+import universe_digest
 
 LOG_PATH = os.path.join(PROJECT_ROOT, "data", "watchlist_check.log")
+LOCK_PATH = os.path.join(PROJECT_ROOT, "data", ".check_watchlist.lock")
 IST = ZoneInfo("Asia/Kolkata")
 MARKET_OPEN, MARKET_CLOSE = dtime(9, 15), dtime(15, 30)
+DAILY_DIGEST_END = dtime(16, 0)
 
 
-def _is_market_hours(now_ist: datetime) -> bool:
+def _is_trading_hours(now_ist: datetime) -> bool:
     if now_ist.weekday() >= 5:  # Sat=5, Sun=6
         return False
     return MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE
+
+
+def _is_eligible_window(now_ist: datetime) -> bool:
+    """Broader than trading hours -- also covers the post-close window the
+    universe digest's daily combos run in."""
+    if now_ist.weekday() >= 5:
+        return False
+    return MARKET_OPEN <= now_ist.time() <= DAILY_DIGEST_END
 
 
 def _log(line: str) -> None:
@@ -40,16 +63,44 @@ def _log(line: str) -> None:
 
 def main():
     now_ist = datetime.now(IST)
-    if not _is_market_hours(now_ist):
-        _log(f"{now_ist:%Y-%m-%d %H:%M:%S %z} SKIPPED (outside NSE market hours)")
+
+    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+    lock_file = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        _log(f"{now_ist:%Y-%m-%d %H:%M:%S %z} SKIPPED (previous run still in progress)")
         return
 
-    results = watchlist.check_all(send_alerts=True)
-    triggered = [r for r in results if r.get("triggered")]
-    failed = [r for r in results if not r.get("ok")]
-    sent = sum(1 for r in triggered if r.get("alert_sent"))
-    _log(f"{now_ist:%Y-%m-%d %H:%M:%S %z} checked={len(results)} triggered={len(triggered)} "
-         f"alerts_sent={sent} failed={len(failed)}")
+    try:
+        if not _is_eligible_window(now_ist):
+            _log(f"{now_ist:%Y-%m-%d %H:%M:%S %z} SKIPPED (outside eligible window)")
+            return
+
+        parts = [f"{now_ist:%Y-%m-%d %H:%M:%S %z}"]
+
+        if _is_trading_hours(now_ist):
+            results = watchlist.check_all(send_alerts=True)
+            triggered = [r for r in results if r.get("triggered")]
+            failed = [r for r in results if not r.get("ok")]
+            sent = sum(1 for r in triggered if r.get("alert_sent"))
+            parts.append(f"watchlist: checked={len(results)} triggered={len(triggered)} "
+                         f"alerts_sent={sent} failed={len(failed)}")
+        else:
+            parts.append("watchlist: skipped (outside trading hours)")
+
+        digest = universe_digest.run_cycle(now_ist, send_alerts=True)
+        if digest["ran"]:
+            b = digest["buckets"]
+            parts.append(f"digest: hits={digest['hits']} messages_sent={digest.get('messages_sent', 0)} "
+                         f"buckets=[15min={b['15min']} hourly={b['hourly']} daily={b['daily']}]")
+        else:
+            parts.append(f"digest: skipped ({digest.get('reason', 'n/a')})")
+
+        _log(" | ".join(parts))
+    finally:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
 
 
 if __name__ == "__main__":
