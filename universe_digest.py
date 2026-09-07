@@ -66,6 +66,11 @@ MODE_LABELS = {
 }
 TF_LABELS = {"15MIN": "15 Minute", "1H": "1 Hour", "1D": "1 Day", "1W": "1 Week", "1M": "1 Month"}
 
+GOLDEN_CROSS_LONG_TERM_NOTE = (
+    "Note: a Golden Cross on the Weekly or Monthly timeframe has historically often "
+    "preceded the stock roughly doubling -- not guaranteed, just a pattern worth watching."
+)
+
 MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
 DAILY_WINDOW_END = dtime(16, 0)
@@ -173,7 +178,16 @@ def _format_section(now_ist: datetime, index: int, mode: str, timeframe: str, de
     sym_width = max((len(s) for s, _ in rows), default=0)
     table_text = "\n".join(f"{s.ljust(sym_width)}  {r}" for s, r in rows)
 
-    return f"{html.escape(header)}\n<pre>{html.escape(table_text)}</pre>"
+    message = f"{html.escape(header)}\n<pre>{html.escape(table_text)}</pre>"
+
+    is_long_term_golden_cross = (
+        mode == "golden_cross" and timeframe in ("1W", "1M")
+        and any(rest == "Golden Cross" for _, rest in rows)
+    )
+    if is_long_term_golden_cross:
+        message += f"\n{html.escape(GOLDEN_CROSS_LONG_TERM_NOTE)}"
+
+    return message
 
 
 def run_cycle(now_ist: datetime, send_alerts: bool = True) -> dict:

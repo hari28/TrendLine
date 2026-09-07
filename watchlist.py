@@ -49,6 +49,11 @@ TRIGGER_VALUES = {
     "unusual_volume": {"Unusual Buying", "Unusual Selling", "Volume Spike (Flat)"},
 }
 
+GOLDEN_CROSS_LONG_TERM_NOTE = (
+    "Note: a Golden Cross on the Weekly or Monthly timeframe has historically often "
+    "preceded the stock roughly doubling -- not guaranteed, just a pattern worth watching."
+)
+
 
 # ---------------------------------------------------------------------------
 # JSON persistence
@@ -193,7 +198,10 @@ def _is_new_trigger(entry: dict, prev_status: str | None, current_status: str) -
     trigger_vals = TRIGGER_VALUES.get(mode, set())
     if current_status in trigger_vals and current_status != prev_status:
         label = SCAN_MODE_LABELS.get(mode, mode)
-        return True, f"TrendLine alert: {symbol} -- {label} -> {current_status}"
+        message = f"TrendLine alert: {symbol} -- {label} -> {current_status}"
+        if mode == "golden_cross" and current_status == "Golden Cross" and entry["timeframe"] in ("1W", "1M"):
+            message += f"\n\n{GOLDEN_CROSS_LONG_TERM_NOTE}"
+        return True, message
     return False, None
 
 
