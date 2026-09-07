@@ -54,6 +54,8 @@ Already done for you in this folder (a `venv/` virtual environment with all
 dependencies installed, including `plotly` for the volume profile chart). If
 you ever move this folder or set it up on another machine, recreate it with:
 
+**macOS / Linux:**
+
 ```bash
 cd ma_screener
 python3 -m venv venv
@@ -61,16 +63,34 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+**Windows (PowerShell or cmd):**
+
+```bat
+cd ma_screener
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+```
+
 ## Daily use
 
-**Easiest:** double-click `Run_Screener.command` in Finder. A Terminal window
-opens, and your default browser opens automatically to the app.
+**macOS — easiest:** double-click `Run_Screener.command` in Finder. A
+Terminal window opens, and your default browser opens automatically to the
+app.
 
-**Or from Terminal:**
+**macOS — from Terminal:**
 
 ```bash
 cd ~/Documents/Claude_PRO/ma_screener
 source venv/bin/activate
+streamlit run app.py
+```
+
+**Windows — from PowerShell or cmd:**
+
+```bat
+cd path\to\ma_screener
+venv\Scripts\activate
 streamlit run app.py
 ```
 
@@ -135,8 +155,9 @@ All charts support scroll-wheel / trackpad zoom (previously off by default —
 now explicitly enabled), plus the standard Plotly gestures: click-and-drag to
 box-zoom into a range, and double-click to reset back to the full view.
 
-**To stop the app:** close the Terminal window it opened, or press
-Control+C inside it. Closing the browser tab alone does not stop the server.
+**To stop the app:** close the Terminal (or PowerShell/cmd) window it opened,
+or press Control+C (Ctrl+C on Windows) inside it. Closing the browser tab
+alone does not stop the server.
 
 ## Notes
 
