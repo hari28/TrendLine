@@ -19,12 +19,12 @@ def _ma(close: pd.Series, ma_type: str, period: int) -> pd.Series:
     return ema(close, period) if ma_type == "EMA" else sma(close, period)
 
 
-def load_frame(symbol: str, timeframe: str) -> pd.DataFrame | None:
+def load_frame(symbol: str, timeframe: str, force_refresh: bool = False) -> pd.DataFrame | None:
     spec = TIMEFRAMES[timeframe]
     if spec["kind"] == "daily":
-        base = fetch_daily_history(symbol)
+        base = fetch_daily_history(symbol, force_refresh=force_refresh)
     else:
-        base = fetch_intraday_history(symbol, interval=spec["fetch_interval"])
+        base = fetch_intraday_history(symbol, interval=spec["fetch_interval"], force_refresh=force_refresh)
     frame = build_frame(timeframe, base)
     if frame is None or frame.empty or len(frame) < 20:
         return None
@@ -35,8 +35,9 @@ def load_frame(symbol: str, timeframe: str) -> pd.DataFrame | None:
 # Mode 1: just above the 200 MA
 # ---------------------------------------------------------------------------
 
-def scan_symbol(symbol: str, segment: str, timeframe: str, ma_type: str) -> dict | None:
-    frame = load_frame(symbol, timeframe)
+def scan_symbol(symbol: str, segment: str, timeframe: str, ma_type: str,
+                 force_refresh: bool = False) -> dict | None:
+    frame = load_frame(symbol, timeframe, force_refresh=force_refresh)
     if frame is None:
         return None
 
@@ -60,14 +61,15 @@ def scan_symbol(symbol: str, segment: str, timeframe: str, ma_type: str) -> dict
     }
 
 
-def scan_universe(symbols: pd.DataFrame, timeframe: str, ma_type: str, progress_cb=None) -> pd.DataFrame:
+def scan_universe(symbols: pd.DataFrame, timeframe: str, ma_type: str, progress_cb=None,
+                   force_refresh: bool = False) -> pd.DataFrame:
     """symbols: DataFrame with columns Symbol, Segment. progress_cb(i, total, symbol) optional."""
     rows = []
     total = len(symbols)
     for i, r in enumerate(symbols.itertuples(index=False)):
         if progress_cb:
             progress_cb(i, total, r.Symbol)
-        result = scan_symbol(r.Symbol, r.Segment, timeframe, ma_type)
+        result = scan_symbol(r.Symbol, r.Segment, timeframe, ma_type, force_refresh=force_refresh)
         if result:
             rows.append(result)
     return pd.DataFrame(rows)
@@ -121,8 +123,9 @@ def _cross_type(close: pd.Series, ma_type: str, lookback: int) -> tuple[str, flo
     return "No recent cross", fast_val, slow_val
 
 
-def scan_symbol_cross(symbol: str, segment: str, timeframe: str, ma_type: str, lookback: int) -> dict | None:
-    frame = load_frame(symbol, timeframe)
+def scan_symbol_cross(symbol: str, segment: str, timeframe: str, ma_type: str, lookback: int,
+                       force_refresh: bool = False) -> dict | None:
+    frame = load_frame(symbol, timeframe, force_refresh=force_refresh)
     if frame is None:
         return None
 
@@ -143,13 +146,13 @@ def scan_symbol_cross(symbol: str, segment: str, timeframe: str, ma_type: str, l
 
 
 def scan_universe_cross(symbols: pd.DataFrame, timeframe: str, ma_type: str, lookback: int,
-                         progress_cb=None) -> pd.DataFrame:
+                         progress_cb=None, force_refresh: bool = False) -> pd.DataFrame:
     rows = []
     total = len(symbols)
     for i, r in enumerate(symbols.itertuples(index=False)):
         if progress_cb:
             progress_cb(i, total, r.Symbol)
-        result = scan_symbol_cross(r.Symbol, r.Segment, timeframe, ma_type, lookback)
+        result = scan_symbol_cross(r.Symbol, r.Segment, timeframe, ma_type, lookback, force_refresh=force_refresh)
         if result:
             rows.append(result)
     return pd.DataFrame(rows)
@@ -163,8 +166,9 @@ def scan_universe_cross(symbols: pd.DataFrame, timeframe: str, ma_type: str, loo
 # ---------------------------------------------------------------------------
 
 def scan_symbol_volume(symbol: str, segment: str, timeframe: str, avg_period: int,
-                        spike_multiple: float, min_price_move_pct: float = 0.2) -> dict | None:
-    frame = load_frame(symbol, timeframe)
+                        spike_multiple: float, min_price_move_pct: float = 0.2,
+                        force_refresh: bool = False) -> dict | None:
+    frame = load_frame(symbol, timeframe, force_refresh=force_refresh)
     if frame is None or len(frame) < avg_period + 2:
         return None
 
@@ -211,13 +215,14 @@ def scan_symbol_volume(symbol: str, segment: str, timeframe: str, avg_period: in
 
 
 def scan_universe_volume(symbols: pd.DataFrame, timeframe: str, avg_period: int, spike_multiple: float,
-                          progress_cb=None) -> pd.DataFrame:
+                          progress_cb=None, force_refresh: bool = False) -> pd.DataFrame:
     rows = []
     total = len(symbols)
     for i, r in enumerate(symbols.itertuples(index=False)):
         if progress_cb:
             progress_cb(i, total, r.Symbol)
-        result = scan_symbol_volume(r.Symbol, r.Segment, timeframe, avg_period, spike_multiple)
+        result = scan_symbol_volume(r.Symbol, r.Segment, timeframe, avg_period, spike_multiple,
+                                     force_refresh=force_refresh)
         if result:
             rows.append(result)
     return pd.DataFrame(rows)
@@ -231,8 +236,8 @@ def scan_universe_volume(symbols: pd.DataFrame, timeframe: str, avg_period: int,
 # ---------------------------------------------------------------------------
 
 def scan_symbol_pattern(symbol: str, segment: str, timeframe: str, pattern_types: list,
-                         lookback: int, pole_min_move_pct: float) -> list:
-    frame = load_frame(symbol, timeframe)
+                         lookback: int, pole_min_move_pct: float, force_refresh: bool = False) -> list:
+    frame = load_frame(symbol, timeframe, force_refresh=force_refresh)
     if frame is None:
         return []
 
@@ -263,11 +268,12 @@ PATTERN_COLUMNS = ["Symbol", "Segment", "Close", "AsOf", "Volume", "Pattern", "D
 
 
 def scan_universe_pattern(symbols: pd.DataFrame, timeframe: str, pattern_types: list, lookback: int,
-                           pole_min_move_pct: float, progress_cb=None) -> pd.DataFrame:
+                           pole_min_move_pct: float, progress_cb=None, force_refresh: bool = False) -> pd.DataFrame:
     rows = []
     total = len(symbols)
     for i, r in enumerate(symbols.itertuples(index=False)):
         if progress_cb:
             progress_cb(i, total, r.Symbol)
-        rows.extend(scan_symbol_pattern(r.Symbol, r.Segment, timeframe, pattern_types, lookback, pole_min_move_pct))
+        rows.extend(scan_symbol_pattern(r.Symbol, r.Segment, timeframe, pattern_types, lookback, pole_min_move_pct,
+                                         force_refresh=force_refresh))
     return pd.DataFrame(rows, columns=PATTERN_COLUMNS)

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.trendline.watchlist</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/harir/Documents/Claude_PRO/ma_screener/venv/bin/python3</string>
+        <string>/Users/harir/Documents/Claude_PRO/ma_screener/check_watchlist.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/harir/Documents/Claude_PRO/ma_screener</string>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/harir/Documents/Claude_PRO/ma_screener/data/launchd_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/harir/Documents/Claude_PRO/ma_screener/data/launchd_stderr.log</string>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

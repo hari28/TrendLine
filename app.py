@@ -36,6 +36,7 @@ from screener import (scan_universe, apply_band, scan_universe_cross, scan_unive
 from indicators import TIMEFRAMES
 from market_data import get_fii_dii_activity, deals_for_symbols
 from chart import build_candles_with_volume_profile, build_ma_overlay_chart
+import watchlist
 
 st.set_page_config(page_title="TrendLine", layout="wide")
 
@@ -43,11 +44,25 @@ TF_KEYS = list(TIMEFRAMES.keys())
 TF_LABELS = [TIMEFRAMES[k]["label"] for k in TF_KEYS]
 DEFAULT_TF_INDEX = TF_LABELS.index("1 Day")
 UNIVERSES = ["Nifty 100 (Large Cap)", "Nifty Midcap 150", "Nifty Smallcap 250"]
+ALL_UNIVERSE_LABEL = "All (Large + Mid + Small Cap)"
+UNIVERSE_OPTIONS = UNIVERSES + [ALL_UNIVERSE_LABEL]
 
 
 def _fmt_asof(series: pd.Series, timeframe: str) -> pd.Series:
     fmt = "%Y-%m-%d %H:%M" if TIMEFRAMES[timeframe]["kind"] == "intraday" else "%Y-%m-%d"
     return pd.to_datetime(series).dt.strftime(fmt)
+
+
+def _current_scan_params(scan_mode, band_low, band_high, lookback, avg_period, spike_multiple,
+                          pattern_types, pattern_lookback, pole_min_move_pct) -> dict:
+    if scan_mode == "Above 200 MA":
+        return {"band_low": band_low, "band_high": band_high}
+    if scan_mode.startswith("Golden Cross"):
+        return {"lookback": lookback}
+    if scan_mode.startswith("Unusual Volume"):
+        return {"avg_period": avg_period, "spike_multiple": spike_multiple}
+    return {"pattern_types": pattern_types, "pattern_lookback": pattern_lookback,
+            "pole_min_move_pct": pole_min_move_pct}
 
 
 def render_market_pulse():
@@ -83,7 +98,8 @@ def render_ma_toggles(key_prefix: str, ma_type: str, periods: tuple = MA_PERIODS
     return tuple(selected)
 
 
-def render_chart_picker(symbols: list, timeframe_key: str, timeframe_label: str, ma_type: str, key_prefix: str):
+def render_chart_picker(symbols: list, timeframe_key: str, timeframe_label: str, ma_type: str, key_prefix: str,
+                         force_refresh: bool = False):
     """A symbol picker + 'Show chart' button rendering a candlestick chart with
     toggleable MA lines (SMA or EMA, matching the current selection)."""
     if not symbols:
@@ -103,7 +119,7 @@ def render_chart_picker(symbols: list, timeframe_key: str, timeframe_label: str,
     shown_symbol = st.session_state.get(shown_key)
     if shown_symbol:
         with st.spinner(f"Fetching {shown_symbol}..."):
-            full = load_frame(shown_symbol, timeframe_key)
+            full = load_frame(shown_symbol, timeframe_key, force_refresh=force_refresh)
         if full is None or full.empty:
             st.error(f"Couldn't fetch usable data for {shown_symbol} on {timeframe_label}.")
         else:
@@ -120,7 +136,10 @@ def render_deals_panel(universe_choice: str):
         "client name yourself — but this is the closest free, per-stock signal for large disclosed "
         "buying or selling."
     )
-    symbols = list(get_constituents(universe_choice)["Symbol"])
+    if universe_choice == ALL_UNIVERSE_LABEL:
+        symbols = sorted(all_universe_symbols["Symbol"].unique().tolist())
+    else:
+        symbols = list(get_constituents(universe_choice)["Symbol"])
     deals = deals_for_symbols(symbols)
     if deals.empty:
         st.write("No bulk or block deals reported for this universe in the latest session.")
@@ -140,8 +159,8 @@ with st.sidebar:
     st.title("📈 TrendLine")
     st.header("Scan settings")
 
-    universe_choice = st.selectbox("Universe", UNIVERSES, index=0)
-    segments = [universe_choice]
+    universe_choice = st.selectbox("Universe", UNIVERSE_OPTIONS, index=0)
+    segments = UNIVERSES if universe_choice == ALL_UNIVERSE_LABEL else [universe_choice]
 
     scan_mode = st.radio(
         "Scan type",
@@ -204,7 +223,22 @@ with st.sidebar:
     st.caption("Any symbol, all 3 universes. Opens in the Stock Chart tab, using the settings above.")
     searched_symbol = st.selectbox("Symbol", [""] + all_symbols_sorted, index=0, key="global_search_symbol")
 
-tab_screener, tab_stock_chart, tab_volume_profile = st.tabs(["Screener", "🔍 Stock Chart", "Volume Profile"])
+    st.divider()
+    st.subheader("⭐ Add to watchlist")
+    if searched_symbol:
+        if st.button(f"➕ Add {searched_symbol} (current scan settings)", use_container_width=True):
+            mode_code = watchlist.SCAN_MODE_CODES[scan_mode]
+            wl_params = _current_scan_params(scan_mode, band_low, band_high, lookback, avg_period,
+                                              spike_multiple, pattern_types, pattern_lookback, pole_min_move_pct)
+            seg = all_universe_symbols.loc[all_universe_symbols["Symbol"] == searched_symbol, "Segment"].iloc[0]
+            watchlist.add_entry(searched_symbol, seg, universe_choice, timeframe, ma_type, mode_code, wl_params)
+            st.success(f"Added {searched_symbol} — will watch for: {scan_mode}.")
+    else:
+        st.caption("Pick a symbol above first.")
+
+tab_screener, tab_stock_chart, tab_volume_profile, tab_watchlist = st.tabs(
+    ["Screener", "🔍 Stock Chart", "Volume Profile", "⭐ Watchlist"]
+)
 
 with tab_screener:
     if scan_mode == "Above 200 MA":
@@ -235,11 +269,6 @@ with tab_screener:
         symbols_df = get_all_symbols(segments, force_refresh=force_refresh_symbols)
         st.write(f"Scanning {len(symbols_df)} symbols in {universe_choice} on {tf_choice_label} ({ma_type})...")
 
-        if force_refresh_prices:
-            import data_fetcher
-            data_fetcher.DAILY_CACHE_MAX_AGE_SECONDS = 0
-            data_fetcher.INTRADAY_CACHE_MAX_AGE_BY_INTERVAL = {k: 0 for k in data_fetcher.INTRADAY_CACHE_MAX_AGE_BY_INTERVAL}
-
         progress = st.progress(0.0)
         status = st.empty()
         start = time.time()
@@ -249,16 +278,18 @@ with tab_screener:
             status.text(f"[{i+1}/{total}] {symbol}")
 
         if scan_mode == "Above 200 MA":
-            results = scan_universe(symbols_df[["Symbol", "Segment"]], timeframe, ma_type, progress_cb=_cb)
+            results = scan_universe(symbols_df[["Symbol", "Segment"]], timeframe, ma_type, progress_cb=_cb,
+                                     force_refresh=force_refresh_prices)
         elif scan_mode.startswith("Golden Cross"):
             results = scan_universe_cross(symbols_df[["Symbol", "Segment"]], timeframe, ma_type, lookback,
-                                           progress_cb=_cb)
+                                           progress_cb=_cb, force_refresh=force_refresh_prices)
         elif scan_mode.startswith("Unusual Volume"):
             results = scan_universe_volume(symbols_df[["Symbol", "Segment"]], timeframe, avg_period,
-                                            spike_multiple, progress_cb=_cb)
+                                            spike_multiple, progress_cb=_cb, force_refresh=force_refresh_prices)
         else:
             results = scan_universe_pattern(symbols_df[["Symbol", "Segment"]], timeframe, pattern_types,
-                                             pattern_lookback, pole_min_move_pct, progress_cb=_cb)
+                                             pattern_lookback, pole_min_move_pct, progress_cb=_cb,
+                                             force_refresh=force_refresh_prices)
 
         elapsed = time.time() - start
         if scan_mode.startswith("Chart Patterns"):
@@ -309,7 +340,8 @@ with tab_screener:
 
         with st.expander(f"📈 View chart for a stock in these results ({len(df)} scanned)", expanded=False):
             render_chart_picker(sorted(df["Symbol"].unique().tolist()), scanned_tf_key,
-                                 st.session_state["scanned_tf"], scanned_ma, key_prefix="results")
+                                 st.session_state["scanned_tf"], scanned_ma, key_prefix="results",
+                                 force_refresh=force_refresh_prices)
 
         if scanned_mode == "Above 200 MA":
             df = apply_band(df, st.session_state["scanned_band_low"], st.session_state["scanned_band_high"])
@@ -494,15 +526,19 @@ with tab_stock_chart:
         is_pattern_mode = scan_mode.startswith("Chart Patterns")
         with st.spinner(f"Fetching {searched_symbol}..."):
             if scan_mode == "Above 200 MA":
-                row = scan_symbol(searched_symbol, segment, timeframe, ma_type)
+                row = scan_symbol(searched_symbol, segment, timeframe, ma_type,
+                                   force_refresh=force_refresh_prices)
             elif scan_mode.startswith("Golden Cross"):
-                row = scan_symbol_cross(searched_symbol, segment, timeframe, ma_type, lookback or 5)
+                row = scan_symbol_cross(searched_symbol, segment, timeframe, ma_type, lookback or 5,
+                                         force_refresh=force_refresh_prices)
             elif is_pattern_mode:
                 row = scan_symbol_pattern(searched_symbol, segment, timeframe, pattern_types or [],
-                                           pattern_lookback or 80, pole_min_move_pct or 8.0)
+                                           pattern_lookback or 80, pole_min_move_pct or 8.0,
+                                           force_refresh=force_refresh_prices)
             else:
-                row = scan_symbol_volume(searched_symbol, segment, timeframe, avg_period or 20, spike_multiple or 2.0)
-            full = load_frame(searched_symbol, timeframe)
+                row = scan_symbol_volume(searched_symbol, segment, timeframe, avg_period or 20,
+                                          spike_multiple or 2.0, force_refresh=force_refresh_prices)
+            full = load_frame(searched_symbol, timeframe, force_refresh=force_refresh_prices)
 
         if is_pattern_mode:
             if not row:
@@ -544,8 +580,11 @@ with tab_volume_profile:
 
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
-        chart_universe = st.selectbox("Universe", UNIVERSES, index=0, key="chart_universe")
-        chart_symbols = sorted(get_constituents(chart_universe)["Symbol"].tolist())
+        chart_universe = st.selectbox("Universe", UNIVERSE_OPTIONS, index=0, key="chart_universe")
+        if chart_universe == ALL_UNIVERSE_LABEL:
+            chart_symbols = sorted(all_universe_symbols["Symbol"].unique().tolist())
+        else:
+            chart_symbols = sorted(get_constituents(chart_universe)["Symbol"].tolist())
         chart_symbol = st.selectbox("Symbol", chart_symbols, key="chart_symbol")
     with c2:
         chart_tf_label = st.selectbox("Timeframe", TF_LABELS, index=DEFAULT_TF_INDEX, key="chart_tf")
@@ -566,7 +605,7 @@ with tab_volume_profile:
     if shown:
         shown_symbol, shown_timeframe, shown_tf_label, shown_bars, shown_bins = shown
         with st.spinner(f"Fetching {shown_symbol}..."):
-            frame = load_frame(shown_symbol, shown_timeframe)
+            frame = load_frame(shown_symbol, shown_timeframe, force_refresh=force_refresh_prices)
         if frame is None or frame.empty:
             st.error(f"Couldn't fetch usable data for {shown_symbol} on {shown_tf_label}.")
         else:
@@ -574,3 +613,59 @@ with tab_volume_profile:
                                                       ma_type=ma_type, periods=vp_periods,
                                                       display_bars=shown_bars)
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+
+with tab_watchlist:
+    st.title("⭐ Watchlist")
+    st.caption(
+        "Each symbol keeps the scan rule it was added with (from the sidebar's settings at the "
+        "time you added it). Status below is a live, read-only check — it never sends alerts on "
+        "page load. Real alerts come from the background launchd job (see README), or on-demand "
+        "with the button below."
+    )
+
+    wl_entries = watchlist.load_watchlist()
+    if not wl_entries:
+        st.info("No symbols yet. Use the 🔍 Search box in the sidebar to pick a symbol, then "
+                 "'➕ Add to watchlist' below it — it saves whichever Scan type and settings are "
+                 "currently selected in the sidebar.")
+    else:
+        wl_rows = []
+        for wl_entry in wl_entries:
+            wl_result = watchlist.evaluate_entry(wl_entry)
+            wl_rows.append({
+                "Symbol": wl_entry["symbol"],
+                "Scan mode": watchlist.SCAN_MODE_LABELS.get(wl_entry["scan_mode"], wl_entry["scan_mode"]),
+                "Timeframe": TIMEFRAMES[wl_entry["timeframe"]]["label"],
+                "MA": wl_entry["ma_type"],
+                "Status": wl_result["status"] if wl_result["ok"] else f"ERROR: {wl_result.get('reason')}",
+                "Added": wl_entry["added_at"],
+            })
+        st.dataframe(pd.DataFrame(wl_rows), use_container_width=True, hide_index=True)
+
+        st.divider()
+        wl_remove_choice = st.selectbox("Remove a symbol", [""] + [e["symbol"] for e in wl_entries],
+                                         key="wl_remove_choice")
+        if wl_remove_choice and st.button(f"🗑️ Remove {wl_remove_choice}"):
+            wl_eid = next(e["id"] for e in wl_entries if e["symbol"] == wl_remove_choice)
+            watchlist.remove_entry(wl_eid)
+            st.rerun()
+
+        st.divider()
+        st.subheader("Send alerts now")
+        st.caption(
+            "Runs the exact same check-and-alert logic as the background launchd job, synchronously "
+            "— useful to test Telegram delivery without waiting for the next scheduled run. Only "
+            "sends for a symbol whose condition newly triggered since the last check (not every time "
+            "it stays true)."
+        )
+        if st.button("📲 Check now & send alerts", type="primary"):
+            with st.spinner("Checking all watchlist entries..."):
+                wl_check_results = watchlist.check_all(send_alerts=True)
+            wl_triggered = [r for r in wl_check_results if r.get("triggered")]
+            st.success(f"Checked {len(wl_check_results)} entries — {len(wl_triggered)} new alert(s) sent.")
+            if wl_triggered:
+                st.dataframe(
+                    pd.DataFrame([{"Symbol": r["entry"]["symbol"], "Status": r["status"],
+                                    "Telegram sent": r.get("alert_sent", False)} for r in wl_triggered]),
+                    use_container_width=True, hide_index=True,
+                )

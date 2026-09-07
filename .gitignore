@@ -5,3 +5,9 @@ __pycache__/
 .DS_Store
 .idea/
 .streamlit/secrets.toml
+.env
+data/watchlist.json
+data/watchlist_state.json
+data/watchlist_check.log
+data/launchd_stdout.log
+data/launchd_stderr.log

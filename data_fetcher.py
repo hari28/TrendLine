@@ -31,7 +31,9 @@ def _cache_path(symbol: str, suffix: str) -> str:
     return os.path.join(CACHE_DIR, f"{symbol}{suffix}.csv")
 
 
-def _load_cache(path: str, max_age: int) -> pd.DataFrame | None:
+def _load_cache(path: str, max_age: int, force_refresh: bool = False) -> pd.DataFrame | None:
+    if force_refresh:
+        return None
     if not os.path.exists(path):
         return None
     if time.time() - os.path.getmtime(path) > max_age:
@@ -52,10 +54,11 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
     return df[~df.index.duplicated(keep="last")].sort_index()
 
 
-def fetch_daily_history(symbol: str, retries: int = 2, pause: float = 0.4) -> pd.DataFrame | None:
+def fetch_daily_history(symbol: str, retries: int = 2, pause: float = 0.4,
+                         force_refresh: bool = False) -> pd.DataFrame | None:
     """Full daily OHLCV history (DatetimeIndex) for NSE:SYMBOL, or None on failure."""
     path = _cache_path(symbol, "")
-    cached = _load_cache(path, DAILY_CACHE_MAX_AGE_SECONDS)
+    cached = _load_cache(path, DAILY_CACHE_MAX_AGE_SECONDS, force_refresh=force_refresh)
     if cached is not None:
         return cached
 
@@ -78,13 +81,13 @@ def fetch_daily_history(symbol: str, retries: int = 2, pause: float = 0.4) -> pd
 
 
 def fetch_intraday_history(symbol: str, interval: str = "60m", retries: int = 2,
-                            pause: float = 0.4) -> pd.DataFrame | None:
+                            pause: float = 0.4, force_refresh: bool = False) -> pd.DataFrame | None:
     """Intraday OHLCV bars at the given yfinance interval ("1m"/"5m"/"15m"/"60m")
     for NSE:SYMBOL, or None on failure. History length and cache TTL both depend
     on the interval -- see INTRADAY_PERIOD_BY_INTERVAL / INTRADAY_CACHE_MAX_AGE_BY_INTERVAL."""
     path = _cache_path(symbol, f"_{interval}")
     max_age = INTRADAY_CACHE_MAX_AGE_BY_INTERVAL.get(interval, 60 * 60)
-    cached = _load_cache(path, max_age)
+    cached = _load_cache(path, max_age, force_refresh=force_refresh)
     if cached is not None:
         return cached
 

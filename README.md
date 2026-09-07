@@ -159,6 +159,96 @@ box-zoom into a range, and double-click to reset back to the full view.
 or press Control+C (Ctrl+C on Windows) inside it. Closing the browser tab
 alone does not stop the server.
 
+## Watchlist Alerts
+
+A 4th tab, **⭐ Watchlist**, lets you save symbols with whatever Scan type +
+settings are currently selected in the sidebar (timeframe, MA type, band/
+lookback/spike/pattern params) at the moment you add them — that saved rule is
+what gets re-checked later, since the background checker below runs headless
+with no sidebar to read.
+
+**Add a symbol:** pick it in the sidebar's 🔍 Search box, then click
+"➕ Add {symbol} (current scan settings)" just below it.
+
+**In the Watchlist tab:** a table shows each entry's current status (a live,
+read-only check — it never sends alerts just from opening the tab), a remove
+control, and a "📲 Check now & send alerts" button that runs the exact same
+check-and-alert logic as the background job, synchronously — useful for
+testing delivery without waiting for the schedule. Alerts only fire on a
+symbol's condition *newly* triggering (e.g. just entered Golden Cross), not
+every time a check finds it still true. The very first check after adding a
+symbol never alerts either — it just records a baseline — so if you add a
+symbol that's already in a triggering state, don't expect an immediate alert.
+
+### Setting up Telegram alerts (active by default)
+
+Alerts are posted into a Telegram group via a bot, using `telegram_bot.py`.
+Setup, one time:
+
+1. In Telegram, message **@BotFather** and send `/newbot`. Follow the prompts
+   (pick a display name, then a username ending in `bot`). It replies with a
+   **bot token** — this is `TELEGRAM_BOT_TOKEN`.
+2. Create a Telegram **Group** (not a Channel), add the bot to it as a member.
+3. Send any message in the group (e.g. "hi"), then visit
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser (with your
+   real token in the URL) — find `"chat":{"id": -123456789, ...}` in the JSON
+   response. That negative number is `TELEGRAM_CHAT_ID`.
+4. Copy `.env.example` to `.env` in this folder and fill in:
+   ```
+   TELEGRAM_BOT_TOKEN=<your bot token>
+   TELEGRAM_CHAT_ID=<your group's chat id>
+   ```
+   `.env` is gitignored — never commit real credentials.
+
+Unlike WhatsApp (below), Telegram bot tokens don't expire and there's no
+24-hour messaging-window restriction — once set up, it keeps working.
+
+### WhatsApp alerts (optional, not wired in by default)
+
+`whatsapp.py` implements the same alert-sending contract via Meta's official
+WhatsApp Cloud API, and is fully working if you set up credentials for it —
+it's just not the module `watchlist.py` currently imports (that's
+`telegram_bot.py`). To switch back, change the import in `watchlist.py` from
+`from telegram_bot import send_telegram_message` to
+`from whatsapp import send_whatsapp_message` (and update the one call site
+that uses it).
+
+If you do switch to it: create a [Meta developer account](https://developers.facebook.com/),
+add the **WhatsApp** product to an App, grab the **Phone Number ID** and an
+access token from the API Setup dashboard, add your recipient number as a
+verified test number, and set `META_WHATSAPP_TOKEN` /
+`META_PHONE_NUMBER_ID` / `META_RECIPIENT_NUMBER` in `.env` (see
+`.env.example`). Two gotchas apply there that don't apply to Telegram:
+quick-start access tokens expire in 24 hours, and free-form text messages
+only deliver within 24 hours of the recipient last messaging the business
+number (send it a WhatsApp message first to open that window, or use an
+approved Message Template for reliable unattended delivery).
+
+### Running checks in the background (launchd)
+
+The Streamlit app only checks the watchlist while it's open. To get alerts
+even when the app is closed (as long as your Mac is on), install the included
+launchd job — it runs `check_watchlist.py` every 15 minutes and skips itself
+outside NSE market hours (Mon–Fri, 9:15–15:30 IST), so it's harmless to leave
+loaded permanently.
+
+```bash
+cp ~/Documents/Claude_PRO/ma_screener/launchd/com.trendline.watchlist.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.trendline.watchlist.plist
+launchctl list | grep trendline   # confirm it's loaded
+```
+
+To stop it:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.trendline.watchlist.plist
+```
+
+Logs: `data/watchlist_check.log` (one line per run — checked/triggered/sent/
+failed counts), plus `data/launchd_stdout.log` / `data/launchd_stderr.log` for
+anything the script itself printed or crashed on. None of these logs rotate —
+fine for a single-user local tool, but they'll grow unboundedly over time.
+
 ## Notes
 
 - Data source: Yahoo Finance for NSE (`SYMBOL.NS`) for prices, and NSE's own
@@ -182,3 +272,6 @@ alone does not stop the server.
   deals vs. history). It does not size positions, place stops, or manage
   risk — apply your own entry/exit discipline before acting on anything it
   surfaces.
+- `data/watchlist.json` and `data/watchlist_state.json` persist across app
+  restarts (unlike `st.session_state`, which is wiped every time) — see
+  "Watchlist Alerts" above.
