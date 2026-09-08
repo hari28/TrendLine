@@ -13,3 +13,4 @@ data/launchd_stdout.log
 data/launchd_stderr.log
 data/universe_digest_state.json
 data/.check_watchlist.lock
+data/active_scan_config.json

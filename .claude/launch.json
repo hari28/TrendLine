@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "trendline",
+      "runtimeExecutable": "/Users/harir/Documents/Claude_PRO/ma_screener/venv/bin/streamlit",
+      "runtimeArgs": ["run", "/Users/harir/Documents/Claude_PRO/ma_screener/app.py", "--server.headless", "true"],
+      "port": 8501
+    }
+  ]
+}

@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from screener import scan_symbol, scan_symbol_cross, scan_symbol_volume, scan_symbol_pattern, apply_band
+from screener import scan_symbol, scan_symbol_cross, scan_symbol_volume, scan_symbol_pattern, apply_band, apply_band_below
 from telegram_bot import send_telegram_message
 
 logger = logging.getLogger("trendline.watchlist")
@@ -35,16 +35,18 @@ STATE_PATH = os.path.join(DATA_DIR, "watchlist_state.json")
 
 SCAN_MODE_LABELS = {
     "above_ma": "Above 200 MA",
+    "below_ma": "Below 200 MA",
     "golden_cross": "Golden Cross / Death Cross (50 vs 200)",
     "unusual_volume": "Unusual Volume (Buying/Selling Spike)",
     "chart_pattern": "Chart Patterns (Triangle / Channel / Flag & Pole)",
 }
 SCAN_MODE_CODES = {v: k for k, v in SCAN_MODE_LABELS.items()}
 
-# Statuses that count as "interesting" for above_ma / golden_cross / unusual_volume.
+# Statuses that count as "interesting" for above_ma / below_ma / golden_cross / unusual_volume.
 # chart_pattern is handled separately (set-diff on Pattern:Direction hits).
 TRIGGER_VALUES = {
     "above_ma": {"In band"},
+    "below_ma": {"In band"},
     "golden_cross": {"Golden Cross", "Death Cross"},
     "unusual_volume": {"Unusual Buying", "Unusual Selling", "Volume Spike (Flat)"},
 }
@@ -143,6 +145,13 @@ def evaluate_entry(entry: dict, force_refresh: bool = False) -> dict:
             if row is None:
                 return {"ok": False, "reason": "no data", "status": None, "raw": None}
             df = apply_band(pd.DataFrame([row]), params["band_low"], params["band_high"])
+            status, raw = df["Status"].iloc[0], row
+
+        elif mode == "below_ma":
+            row = scan_symbol(symbol, segment, timeframe, ma_type, force_refresh=force_refresh)
+            if row is None:
+                return {"ok": False, "reason": "no data", "status": None, "raw": None}
+            df = apply_band_below(pd.DataFrame([row]), params["band_low"], params["band_high"])
             status, raw = df["Status"].iloc[0], row
 
         elif mode == "golden_cross":

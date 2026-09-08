@@ -92,6 +92,26 @@ def apply_band(df: pd.DataFrame, band_low: float, band_high: float) -> pd.DataFr
     return df
 
 
+def apply_band_below(df: pd.DataFrame, band_low: float, band_high: float) -> pd.DataFrame:
+    """Mirror of apply_band for short setups: band_low/band_high are read as % BELOW
+    the 200 MA instead of % above -- e.g. (0, 3) means "just broke down, 0-3% under the
+    MA", the short-side equivalent of apply_band's "just crossed above" long entry zone."""
+    df = df.copy()
+
+    def _status(r):
+        if not r["HasEnoughHistory"] or pd.isna(r["PctAbove"]):
+            return "Insufficient history"
+        pct_below = -r["PctAbove"]
+        if pct_below < band_low:
+            return "Not below MA"
+        if pct_below <= band_high:
+            return "In band"
+        return "Extended below"
+
+    df["Status"] = df.apply(_status, axis=1)
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Mode 2: golden cross / death cross (50 MA vs 200 MA)
 # ---------------------------------------------------------------------------

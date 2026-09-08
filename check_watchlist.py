@@ -33,6 +33,7 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 import watchlist
 import universe_digest
+import screener_alert
 
 LOG_PATH = os.path.join(PROJECT_ROOT, "data", "watchlist_check.log")
 LOCK_PATH = os.path.join(PROJECT_ROOT, "data", ".check_watchlist.lock")
@@ -86,6 +87,12 @@ def main():
             sent = sum(1 for r in triggered if r.get("alert_sent"))
             parts.append(f"watchlist: checked={len(results)} triggered={len(triggered)} "
                          f"alerts_sent={sent} failed={len(failed)}")
+
+            screener_alert_result = screener_alert.run_cycle(now_ist)
+            if screener_alert_result["ran"]:
+                parts.append(f"screener_alert: sent={screener_alert_result['sent']}")
+            else:
+                parts.append(f"screener_alert: skipped ({screener_alert_result['reason']})")
         else:
             parts.append("watchlist: skipped (outside trading hours)")
 

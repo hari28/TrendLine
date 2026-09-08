@@ -18,6 +18,8 @@ import time
 import pandas as pd
 import yfinance as yf
 
+from indices import INDEX_YF_TICKERS
+
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 DAILY_CACHE_MAX_AGE_SECONDS = 12 * 60 * 60   # EOD data: refetch at most twice a day
 
@@ -28,7 +30,15 @@ INTRADAY_CACHE_MAX_AGE_BY_INTERVAL = {
 
 
 def _cache_path(symbol: str, suffix: str) -> str:
-    return os.path.join(CACHE_DIR, f"{symbol}{suffix}.csv")
+    safe = symbol.replace(" ", "_").replace("&", "and")
+    return os.path.join(CACHE_DIR, f"{safe}{suffix}.csv")
+
+
+def _to_yf_ticker(symbol: str) -> str:
+    """NSE indices don't follow the plain "SYMBOL.NS" convention (Yahoo uses
+    "^XXXX" or a differently-formatted "XXXX.NS") -- look those up, and
+    default to the standard equity suffix for everything else."""
+    return INDEX_YF_TICKERS.get(symbol, f"{symbol}.NS")
 
 
 def _load_cache(path: str, max_age: int, force_refresh: bool = False) -> pd.DataFrame | None:
@@ -63,7 +73,7 @@ def fetch_daily_history(symbol: str, retries: int = 2, pause: float = 0.4,
         return cached
 
     os.makedirs(CACHE_DIR, exist_ok=True)
-    ticker = f"{symbol}.NS"
+    ticker = _to_yf_ticker(symbol)
     last_err = None
     for attempt in range(retries + 1):
         try:
@@ -92,7 +102,7 @@ def fetch_intraday_history(symbol: str, interval: str = "60m", retries: int = 2,
         return cached
 
     os.makedirs(CACHE_DIR, exist_ok=True)
-    ticker = f"{symbol}.NS"
+    ticker = _to_yf_ticker(symbol)
     period = INTRADAY_PERIOD_BY_INTERVAL.get(interval, "60d")
     last_err = None
     for attempt in range(retries + 1):

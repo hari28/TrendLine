@@ -36,7 +36,7 @@ import pandas as pd
 
 from constituents import get_all_symbols
 from screener import (scan_universe, scan_universe_cross, scan_universe_volume, scan_universe_pattern,
-                       apply_band)
+                       apply_band, apply_band_below)
 from telegram_bot import send_telegram_message
 
 logger = logging.getLogger("trendline.universe_digest")
@@ -50,6 +50,7 @@ ALL_UNIVERSES = ["Nifty 100 (Large Cap)", "Nifty Midcap 150", "Nifty Smallcap 25
 MA_TYPE = "EMA"
 MIN_VOLUME = 500000
 ABOVE_MA_BAND = (0.0, 2.0)
+BELOW_MA_BAND = (0.0, 2.0)
 CROSS_LOOKBACK = 5
 VOLUME_AVG_PERIOD = 20
 VOLUME_SPIKE_MULTIPLE = 2.0
@@ -57,9 +58,10 @@ PATTERN_TYPES = ["Triangle", "Channel", "Flag & Pole"]
 PATTERN_LOOKBACK = 80
 PATTERN_POLE_MIN_MOVE_PCT = 8.0
 
-SCAN_MODES = ["above_ma", "golden_cross", "unusual_volume", "chart_pattern"]
+SCAN_MODES = ["above_ma", "below_ma", "golden_cross", "unusual_volume", "chart_pattern"]
 MODE_LABELS = {
     "above_ma": f"Above 200 {MA_TYPE}",
+    "below_ma": f"Below 200 {MA_TYPE}",
     "golden_cross": "Golden Cross / Death Cross",
     "unusual_volume": "Unusual Volume",
     "chart_pattern": "Chart Patterns",
@@ -107,6 +109,16 @@ def _qualifying_symbols(mode: str, timeframe: str, symbols_df: pd.DataFrame) -> 
             results = apply_band(results, *ABOVE_MA_BAND)
             hits = results[results["Status"] == "In band"]
             return {r.Symbol: f"{r.Symbol}: In band ({r.PctAbove:.2f}% above {MA_TYPE}200)"
+                    for r in hits.itertuples()}
+
+        if mode == "below_ma":
+            results = scan_universe(symbols_df, timeframe, MA_TYPE, force_refresh=False)
+            if results.empty:
+                return {}
+            results = results[results["Volume"] >= MIN_VOLUME]
+            results = apply_band_below(results, *BELOW_MA_BAND)
+            hits = results[results["Status"] == "In band"]
+            return {r.Symbol: f"{r.Symbol}: In band ({-r.PctAbove:.2f}% below {MA_TYPE}200)"
                     for r in hits.itertuples()}
 
         if mode == "golden_cross":

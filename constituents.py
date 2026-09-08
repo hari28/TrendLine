@@ -9,8 +9,12 @@ import time
 import requests
 import pandas as pd
 
+from indices import get_index_universe
+
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "data")
 CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60  # 1 week
+
+INDEX_UNIVERSE_LABEL = "Indices (Nifty, Bank Nifty & Sectoral)"
 
 INDEX_URLS = {
     "Nifty 100 (Large Cap)": "https://nsearchives.nseindia.com/content/indices/ind_nifty100list.csv",
@@ -33,6 +37,9 @@ def _cache_path(index_name: str) -> str:
 
 def get_constituents(index_name: str, force_refresh: bool = False) -> pd.DataFrame:
     """Return a DataFrame with columns: Company Name, Industry, Symbol, Series, ISIN Code."""
+    if index_name == INDEX_UNIVERSE_LABEL:
+        return get_index_universe()
+
     os.makedirs(CACHE_DIR, exist_ok=True)
     path = _cache_path(index_name)
 
