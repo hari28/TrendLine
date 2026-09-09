@@ -34,6 +34,7 @@ jobs:
             data/watchlist_state.json
             data/universe_digest_state.json
             data/active_scan_config.json
+            data/cpr_state.json
           key: trendline-state-${{ github.run_id }}
           restore-keys: |
             trendline-state-
@@ -56,4 +57,5 @@ jobs:
             data/watchlist_state.json
             data/universe_digest_state.json
             data/active_scan_config.json
+            data/cpr_state.json
           key: trendline-state-${{ github.run_id }}

@@ -134,7 +134,7 @@ def build_candles_with_volume_profile(full_frame: pd.DataFrame, symbol: str, tim
         legend=dict(orientation="h", y=1.06),
     )
     fig.update_xaxes(title_text="Volume", row=1, col=2)
-    return fig
+    return fig, float(bin_centers[poc_idx])
 
 
 def build_ma_overlay_chart(full_frame: pd.DataFrame, symbol: str, timeframe_label: str, ma_type: str,

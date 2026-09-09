@@ -266,6 +266,21 @@ with the next scheduled one. This is macOS/POSIX-only (uses `fcntl`) — fine
 since it's only invoked by the launchd job below, not the cross-platform
 Streamlit app itself.
 
+### CPR Alert — newly-narrow CPR, once per day
+
+Also part of the same `check_watchlist.py` job, `cpr_alert.py` scans the same
+**entire "All" universe** for **Narrow** CPR (see the 🎯 Narrow CPR tab) and
+posts a Telegram digest of stocks that **newly** turned narrow — i.e. weren't
+narrow the previous trading day.
+
+Unlike the Universe Digest's 15-Minute/1-Hour/Daily buckets above, this runs
+**once per calendar day only**, in the same post-close window (15:30–16:00
+IST) — CPR is derived from the last *completed* session and stays fixed for
+the whole next session, so checking more often than once a day would just
+recompute the same numbers. Same first-run rule as the other alerts: the very
+first check only records a baseline and never fires. State lives in
+`data/cpr_state.json`.
+
 ### Running checks in the background (launchd)
 
 The Streamlit app only checks things while it's open. To get alerts even
@@ -292,10 +307,11 @@ To stop it:
 launchctl unload ~/Library/LaunchAgents/com.trendline.watchlist.plist
 ```
 
-Logs: `data/watchlist_check.log` (one line per run, covering both the
-per-symbol Watchlist and the Universe Digest — checked/triggered/sent/failed
-counts for the former, hits/alert_sent/which cadence buckets ran for the
-latter; either half shows "skipped" when outside its relevant hours), plus
+Logs: `data/watchlist_check.log` (one line per run, covering the per-symbol
+Watchlist, the Universe Digest, and the CPR Alert — checked/triggered/sent/failed
+counts for the first, hits/messages_sent/which cadence buckets ran for the
+second, hits/messages_sent for the third; each part shows "skipped" when
+outside its relevant hours), plus
 `data/launchd_stdout.log` / `data/launchd_stderr.log` for anything the script
 itself printed or crashed on. None of these logs rotate — fine for a
 single-user local tool, but they'll grow unboundedly over time.

@@ -34,6 +34,7 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 import watchlist
 import universe_digest
 import screener_alert
+import cpr_alert
 
 LOG_PATH = os.path.join(PROJECT_ROOT, "data", "watchlist_check.log")
 LOCK_PATH = os.path.join(PROJECT_ROOT, "data", ".check_watchlist.lock")
@@ -103,6 +104,12 @@ def main():
                          f"buckets=[15min={b['15min']} hourly={b['hourly']} daily={b['daily']}]")
         else:
             parts.append(f"digest: skipped ({digest.get('reason', 'n/a')})")
+
+        cpr_result = cpr_alert.run_cycle(now_ist, send_alerts=True)
+        if cpr_result["ran"]:
+            parts.append(f"cpr: hits={cpr_result['hits']} messages_sent={cpr_result.get('messages_sent', 0)}")
+        else:
+            parts.append(f"cpr: skipped ({cpr_result.get('reason', 'n/a')})")
 
         _log(" | ".join(parts))
     finally:

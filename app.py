@@ -41,6 +41,7 @@ import watchlist
 import screener_alert
 import cpr
 import fo_universe
+import telegram_bot
 
 st.set_page_config(page_title="TrendLine", layout="wide")
 
@@ -67,6 +68,29 @@ def _current_scan_params(scan_mode, band_low, band_high, lookback, avg_period, s
         return {"avg_period": avg_period, "spike_multiple": spike_multiple}
     return {"pattern_types": pattern_types, "pattern_lookback": pattern_lookback,
             "pole_min_move_pct": pole_min_move_pct}
+
+
+def render_telegram_send_button(key_prefix: str, header_lines: list, records: list) -> None:
+    """A "📲 Send to Telegram" section for a single snapshot (not a scan digest --
+    those go through screener_alert.py). `records` is a list of flat dicts (one
+    per row shown on screen); each renders as its own numbered "Key: value | Key:
+    value" block, separated by a blank line, so a multi-row snapshot reads as a
+    list rather than a wall of text in Telegram."""
+    st.divider()
+    st.subheader("📲 Send to Telegram")
+    if not records:
+        st.caption("Nothing to send yet.")
+        return
+    if st.button("📲 Send this snapshot now", key=f"{key_prefix}_send_tg"):
+        body_blocks = [f"{i}. " + " | ".join(f"{k}: {v}" for k, v in rec.items())
+                        for i, rec in enumerate(records, start=1)]
+        message = "\n".join(header_lines) + "\n\n" + "\n\n".join(body_blocks)
+        with st.spinner("Sending to Telegram..."):
+            sent = telegram_bot.send_telegram_message(message)
+        if sent:
+            st.success("Sent to Telegram.")
+        else:
+            st.error("Telegram send failed — check .env credentials or your network.")
 
 
 def render_market_pulse():
@@ -245,8 +269,8 @@ with st.sidebar:
     else:
         st.caption("Pick a symbol above first.")
 
-tab_screener, tab_stock_chart, tab_volume_profile, tab_cpr, tab_watchlist, tab_telegram = st.tabs(
-    ["Screener", "🔍 Stock Chart", "Volume Profile", "🎯 Narrow CPR", "⭐ Watchlist", "📲 Telegram Alerts"]
+tab_screener, tab_stock_chart, tab_volume_profile, tab_cpr, tab_watchlist = st.tabs(
+    ["Screener", "🔍 Stock Chart", "Volume Profile", "🎯 Narrow CPR", "⭐ Watchlist"]
 )
 
 with tab_screener:
@@ -592,6 +616,36 @@ with tab_screener:
         "that discipline is on you before every entry."
     )
 
+    st.divider()
+    st.subheader("📲 Send to Telegram")
+    active_scan = screener_alert.get_active_scan()
+    if active_scan and active_scan.get("date") == datetime.now(screener_alert.IST).strftime("%Y-%m-%d"):
+        st.caption(
+            f"🔁 Currently auto-repeating every 15 min until market close: **{active_scan['scan_mode']}** "
+            f"on **{active_scan['universe_choice']}** ({active_scan['timeframe_label']}, "
+            f"{active_scan['ma_type']}). The button below (re)sends it on demand, independent of that cycle."
+        )
+    last_scan_config = st.session_state.get("last_scan_config")
+    if not last_scan_config or results is None:
+        st.caption("Run a scan above first — this sends whatever that scan found.")
+    else:
+        tg_hits = screener_alert.qualifying_hits(last_scan_config, results)
+        st.write(f"**Currently qualifying: {len(tg_hits)}**")
+        if tg_hits:
+            st.dataframe(
+                pd.DataFrame(tg_hits)[["symbol", "detail", "ma_value", "close"]]
+                  .rename(columns={"symbol": "Symbol", "detail": "Detail", "ma_value": "Moving Avg",
+                                    "close": "Close"}),
+                use_container_width=True, hide_index=True,
+            )
+        if st.button("📲 Send Telegram alert now", type="primary", key="screener_send_tg"):
+            with st.spinner("Sending to Telegram..."):
+                tg_sent = screener_alert.send_snapshot_now(last_scan_config, results=results)
+            if tg_sent:
+                st.success("Sent to Telegram.")
+            else:
+                st.error("Telegram send failed — check .env credentials or your network.")
+
 with tab_stock_chart:
     st.title("Stock Chart")
     st.caption(
@@ -622,6 +676,7 @@ with tab_stock_chart:
                                           spike_multiple or 2.0, force_refresh=force_refresh_prices)
             full = load_frame(searched_symbol, timeframe, force_refresh=force_refresh_prices)
 
+        stock_chart_records = []
         if is_pattern_mode:
             if not row:
                 st.info(f"No selected pattern found for {searched_symbol} on {tf_choice_label} with these settings.")
@@ -629,8 +684,9 @@ with tab_stock_chart:
                 out = pd.DataFrame(row).copy()
                 out["AsOf"] = _fmt_asof(out["AsOf"], timeframe)
                 out["Close"] = out["Close"].round(2)
-                st.dataframe(out.drop(columns=["Segment"], errors="ignore"), use_container_width=True,
-                             hide_index=True)
+                out = out.drop(columns=["Segment"], errors="ignore")
+                st.dataframe(out, use_container_width=True, hide_index=True)
+                stock_chart_records = out.to_dict("records")
         elif row is None:
             st.error(f"Couldn't fetch usable data for {searched_symbol} on {tf_choice_label}.")
         else:
@@ -639,8 +695,9 @@ with tab_stock_chart:
             for c in out.columns:
                 if out[c].dtype.kind == "f":
                     out[c] = out[c].round(2)
-            st.dataframe(out.drop(columns=["Segment", "BarsAvailable"], errors="ignore"), use_container_width=True,
-                         hide_index=True)
+            out = out.drop(columns=["Segment", "BarsAvailable"], errors="ignore")
+            st.dataframe(out, use_container_width=True, hide_index=True)
+            stock_chart_records = out.to_dict("records")
 
         bars = st.number_input("Bars to show", min_value=50, max_value=1000, value=250, step=25,
                                 key="stock_chart_bars")
@@ -652,6 +709,16 @@ with tab_stock_chart:
             fig = build_ma_overlay_chart(full, searched_symbol, tf_choice_label, ma_type,
                                           periods=stock_chart_periods, display_bars=int(bars))
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+
+        render_telegram_send_button(
+            "stock_chart",
+            header_lines=[
+                f"{datetime.now():%d-%b-%Y %H:%M} IST",
+                f"🔍 Stock Chart snapshot — {searched_symbol}",
+                f"Scan: {scan_mode} | Timeframe: {tf_choice_label} | MA: {ma_type}",
+            ],
+            records=stock_chart_records,
+        )
 
 with tab_volume_profile:
     st.title("Chart & Fixed Range Volume Profile")
@@ -684,6 +751,7 @@ with tab_volume_profile:
         st.session_state[shown_key] = (chart_symbol, chart_timeframe, chart_tf_label, int(num_bars), int(num_bins))
 
     shown = st.session_state.get(shown_key)
+    vp_records = []
     if shown:
         shown_symbol, shown_timeframe, shown_tf_label, shown_bars, shown_bins = shown
         with st.spinner(f"Fetching {shown_symbol}..."):
@@ -691,10 +759,23 @@ with tab_volume_profile:
         if frame is None or frame.empty:
             st.error(f"Couldn't fetch usable data for {shown_symbol} on {shown_tf_label}.")
         else:
-            fig = build_candles_with_volume_profile(frame, shown_symbol, shown_tf_label, shown_bins,
-                                                      ma_type=ma_type, periods=vp_periods,
-                                                      display_bars=shown_bars)
+            fig, poc_price = build_candles_with_volume_profile(frame, shown_symbol, shown_tf_label, shown_bins,
+                                                                 ma_type=ma_type, periods=vp_periods,
+                                                                 display_bars=shown_bars)
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+            last_close = float(frame["Close"].iloc[-1])
+            vp_records = [{"Symbol": shown_symbol, "Close": round(last_close, 2), "POC": round(poc_price, 2),
+                            "Bars": shown_bars}]
+
+    render_telegram_send_button(
+        "volume_profile",
+        header_lines=[
+            f"{datetime.now():%d-%b-%Y %H:%M} IST",
+            f"📊 Volume Profile snapshot — {shown[0] if shown else ''}",
+            f"Timeframe: {shown[2] if shown else ''}",
+        ],
+        records=vp_records,
+    )
 
 with tab_cpr:
     st.title("🎯 Narrow CPR Scanner")
@@ -773,6 +854,7 @@ with tab_cpr:
         st.session_state["cpr_scanned_fo_only"] = cpr_fo_only and cpr_universe != INDEX_UNIVERSE_LABEL
 
     cpr_results = st.session_state.get("cpr_results")
+    cpr_narrow_records = []
 
     if cpr_results is None:
         st.info("Set your filters above and click **Run CPR scan**. First run of the day is slower "
@@ -835,6 +917,8 @@ with tab_cpr:
                 _fmt_cpr(narrow_filtered).to_csv(index=False),
                 file_name=f"narrow_cpr_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
             )
+            cpr_narrow_records = _fmt_cpr(narrow_filtered)[["Symbol", "Width %", "TC", "Pivot", "BC"]] \
+                .to_dict("records")
 
         narrow = cdf[cdf["Category"] == "Narrow"]
         normal = cdf[cdf["Category"] == "Normal"]
@@ -845,6 +929,16 @@ with tab_cpr:
             st.dataframe(_fmt_cpr(normal) if not normal.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
         with st.expander(f"Wide (>1%) ({len(wide)})"):
             st.dataframe(_fmt_cpr(wide) if not wide.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
+
+    render_telegram_send_button(
+        "cpr",
+        header_lines=[
+            f"{datetime.now():%d-%b-%Y %H:%M} IST",
+            "🎯 Narrow CPR snapshot",
+            f"Universe: {cpr_universe} | Width % range: [{cpr_width_gte}, {cpr_width_lt})",
+        ],
+        records=cpr_narrow_records,
+    )
 
 with tab_watchlist:
     st.title("⭐ Watchlist")
@@ -883,7 +977,7 @@ with tab_watchlist:
             st.rerun()
 
         st.divider()
-        st.subheader("Send alerts now")
+        st.subheader("📲 Send to Telegram")
         st.caption(
             "Runs the exact same check-and-alert logic as the background launchd job, synchronously "
             "— useful to test Telegram delivery without waiting for the next scheduled run. Only "
@@ -901,57 +995,3 @@ with tab_watchlist:
                                     "Telegram sent": r.get("alert_sent", False)} for r in wl_triggered]),
                     use_container_width=True, hide_index=True,
                 )
-
-with tab_telegram:
-    st.title("📲 Telegram Alerts")
-    st.caption(
-        "Manually (re)send the last scan you ran in the Screener tab to Telegram, any time you like — "
-        "independent of the automatic send that already fires the moment you click Run scan, and the "
-        "15-minute auto-repeat that follows it until market close."
-    )
-
-    active_scan = screener_alert.get_active_scan()
-    if active_scan and active_scan.get("date") == datetime.now(screener_alert.IST).strftime("%Y-%m-%d"):
-        st.info(
-            f"🔁 Currently auto-repeating every 15 min until market close: **{active_scan['scan_mode']}** "
-            f"on **{active_scan['universe_choice']}** ({active_scan['timeframe_label']}, "
-            f"{active_scan['ma_type']})."
-        )
-    else:
-        st.caption("No scan is currently set to auto-repeat today — run one in the Screener tab to start that.")
-
-    st.divider()
-
-    tg_config = st.session_state.get("last_scan_config")
-    tg_results = st.session_state.get("results")
-
-    if not tg_config or tg_results is None:
-        st.info("Run a scan in the Screener tab first — this screen sends whatever that scan found.")
-    else:
-        st.subheader(f"Last scan: {tg_config['scan_mode']}")
-        st.write(
-            f"**Universe:** {tg_config['universe_choice']}  \n"
-            f"**Timeframe:** {tg_config['timeframe_label']}  \n"
-            f"**MA type:** {tg_config['ma_type']}  \n"
-            f"**Scanned at:** {st.session_state.get('scanned_at')}"
-        )
-
-        tg_hits = screener_alert.qualifying_hits(tg_config, tg_results)
-        st.write(f"**Currently qualifying: {len(tg_hits)}**")
-        if tg_hits:
-            st.dataframe(
-                pd.DataFrame(tg_hits)[["symbol", "detail", "ma_value", "close"]]
-                  .rename(columns={"symbol": "Symbol", "detail": "Detail", "ma_value": "Moving Avg",
-                                    "close": "Close"}),
-                use_container_width=True, hide_index=True,
-            )
-        else:
-            st.write("No symbols currently match this scan's conditions.")
-
-        if st.button("📲 Send Telegram alert now", type="primary"):
-            with st.spinner("Sending to Telegram..."):
-                tg_sent = screener_alert.send_snapshot_now(tg_config, results=tg_results)
-            if tg_sent:
-                st.success("Sent to Telegram.")
-            else:
-                st.error("Telegram send failed — check .env credentials or your network.")
