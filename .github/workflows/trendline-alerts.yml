@@ -1,0 +1,59 @@
+name: TrendLine Alerts
+
+# Runs check_watchlist.py on a schedule so the Telegram alert pipeline no
+# longer depends on a Mac being awake with launchd loaded. The script itself
+# (see check_watchlist.py) already gates on NSE trading hours/weekdays, so it
+# is safe to fire this on a wider window -- off-hours runs just no-op fast.
+#
+# Cron times are UTC. IST = UTC+5:30, so 9:15-16:00 IST -> ~03:45-10:30 UTC.
+# Widened slightly on both ends to be safe against schedule drift.
+on:
+  schedule:
+    - cron: "*/15 3-10 * * 1-5"
+  workflow_dispatch: {}  # lets you trigger a run manually from the Actions tab
+
+concurrency:
+  group: trendline-alerts
+  cancel-in-progress: false  # never kill a run mid-cycle; let it finish, skip overlap instead
+
+jobs:
+  run-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Restore alert state (watchlist/digest dedup state)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/watchlist.json
+            data/watchlist_state.json
+            data/universe_digest_state.json
+            data/active_scan_config.json
+          key: trendline-state-${{ github.run_id }}
+          restore-keys: |
+            trendline-state-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run alert cycle
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python check_watchlist.py
+
+      - name: Save alert state for next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/watchlist.json
+            data/watchlist_state.json
+            data/universe_digest_state.json
+            data/active_scan_config.json
+          key: trendline-state-${{ github.run_id }}
