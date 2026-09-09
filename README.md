@@ -144,6 +144,30 @@ candlestick chart (with MA lines overlaid) plus a horizontal volume-by-price
 histogram; the orange line marks the Point of Control (the price level with
 the most traded volume in that range).
 
+### 📐 Market Structure tab
+Independent controls (its own universe, timeframe, and swing strength) — a
+different screening approach from the sidebar's scan types, based on classic
+price-action swing structure rather than moving averages alone:
+- **Uptrend** = a Higher High (HH) followed by a Higher Low (HL); **Downtrend**
+  = a Lower High (LH) followed by a Lower Low (LL). Swing highs/lows are
+  fractal pivots — a bar whose High/Low is the most extreme within **Swing
+  strength** bars on each side (default 20; higher = only major, longer-term
+  swings count, lower = more, smaller swings). A swing can't be confirmed
+  until that many bars afterward exist, so the most recent swing strength's
+  worth of bars can never show a confirmed pivot yet.
+- **Uptrend**/**Downtrend** additionally require the close to be on the right
+  side of *both* the 10- and 20-period MA (EMA/SMA per the sidebar setting) —
+  structure alone can lag, so this confirms the trend is live, not stale.
+  Structure without that MA confirmation shows separately (e.g. "Uptrend
+  structure, but below MA").
+- **Character Change** fires when the structure's classification actually
+  flips from one confirmed direction to the other (not on every wiggle) — a
+  potential reversal in progress. "Recent" is however many bars back you set.
+- Click **Run Structure scan**, then use **"View swing chart for a stock in
+  these results"** to see a candlestick chart with swing-high/low markers
+  (labeled HH/LH/HL/LL) and the most recent Character Change flagged with a
+  dashed vertical line.
+
 ### Moving average toggles
 Everywhere MA lines appear (Stock Chart tab, the Screener tab's "View chart"
 picker, and the Volume Profile tab), a row of checkboxes — one per period
