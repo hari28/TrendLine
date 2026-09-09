@@ -1,10 +1,11 @@
 """Candlestick charts:
 - build_candles_with_volume_profile: Fixed Range Volume Profile (volume-by-price) + optional MA lines
 - build_ma_overlay_chart: candlesticks + moving average lines + volume
+- build_structure_chart: candlesticks + swing-high/low markers (HH/LH/HL/LL) + Character Change marker
 
-Both accept `periods` (which MA lines to draw) so callers can wire up on/off
-toggles -- pass a shorter tuple, or () to hide all MA lines, without changing
-the underlying data fetch.
+The first two accept `periods` (which MA lines to draw) so callers can wire up
+on/off toggles -- pass a shorter tuple, or () to hide all MA lines, without
+changing the underlying data fetch.
 """
 import numpy as np
 import pandas as pd
@@ -12,6 +13,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from indicators import sma, ema
+from structure import analyze_structure
 
 _MA_COLORS = {10: "#FFA500", 20: "#008000", 50: "#FF0000", 200: "#000000"}  # orange, green, red, black
 
@@ -171,6 +173,76 @@ def build_ma_overlay_chart(full_frame: pd.DataFrame, symbol: str, timeframe_labe
     if ma_type and periods:
         title += f" — {ma_type} " + "/".join(str(p) for p in periods)
 
+    fig.update_layout(
+        title=title,
+        xaxis_rangeslider_visible=False,
+        height=560,
+        margin=dict(l=40, r=20, t=50, b=30),
+        legend=dict(orientation="h", y=1.06),
+    )
+    return fig
+
+
+def build_structure_chart(full_frame: pd.DataFrame, symbol: str, timeframe_label: str, order: int,
+                           display_bars: int = 250) -> go.Figure:
+    """full_frame: the COMPLETE OHLC history -- swings are found over the full series
+    (a swing point near the edge of a truncated window can't be confirmed correctly),
+    then only swings landing within the last `display_bars` are plotted."""
+    result = analyze_structure(full_frame, order)
+    frame = full_frame.tail(display_bars)
+    cutoff = len(full_frame) - len(frame)
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03,
+    )
+    fig.add_trace(
+        go.Candlestick(
+            x=frame.index, open=frame["Open"], high=frame["High"], low=frame["Low"], close=frame["Close"],
+            name=symbol, showlegend=False,
+        ),
+        row=1, col=1,
+    )
+
+    highs_x, highs_y, highs_text = [], [], []
+    lows_x, lows_y, lows_text = [], [], []
+    for sp in result["swing_points"]:
+        if sp["index"] < cutoff:
+            continue
+        idx = full_frame.index[sp["index"]]
+        if sp["kind"] == "high":
+            highs_x.append(idx), highs_y.append(sp["price"]), highs_text.append(sp["label"] or "H")
+        else:
+            lows_x.append(idx), lows_y.append(sp["price"]), lows_text.append(sp["label"] or "L")
+
+    fig.add_trace(
+        go.Scatter(x=highs_x, y=highs_y, mode="markers+text", text=highs_text, textposition="top center",
+                   marker=dict(symbol="triangle-down", size=9, color="#FF0000"), name="Swing High",
+                   showlegend=False),
+        row=1, col=1,
+    )
+    fig.add_trace(
+        go.Scatter(x=lows_x, y=lows_y, mode="markers+text", text=lows_text, textposition="bottom center",
+                   marker=dict(symbol="triangle-up", size=9, color="#008000"), name="Swing Low",
+                   showlegend=False),
+        row=1, col=1,
+    )
+
+    if result["choch_bars_ago"] is not None:
+        choch_pos = len(full_frame) - 1 - result["choch_bars_ago"]
+        if choch_pos >= cutoff:
+            fig.add_vline(x=frame.index[choch_pos - cutoff], line_dash="dash", line_color="#9b59b6",
+                          annotation_text=f"CHoCH → {result['choch_type']}", annotation_position="top",
+                          row=1, col=1)
+
+    fig.add_trace(
+        go.Bar(x=frame.index, y=frame["Volume"], marker_color="rgba(99, 110, 250, 0.45)",
+               showlegend=False, name="Volume"),
+        row=2, col=1,
+    )
+
+    _apply_crosshair(fig, timeframe_label, rows=2)
+
+    title = f"{symbol} — {timeframe_label} — Market Structure (Trend: {result['trend'] or 'Establishing'})"
     fig.update_layout(
         title=title,
         xaxis_rangeslider_visible=False,

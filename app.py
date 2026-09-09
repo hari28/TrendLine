@@ -36,10 +36,11 @@ from screener import (scan_universe, apply_band, apply_band_below, scan_universe
                        scan_universe_pattern, scan_symbol_pattern)
 from indicators import TIMEFRAMES
 from market_data import get_fii_dii_activity, deals_for_symbols
-from chart import build_candles_with_volume_profile, build_ma_overlay_chart
+from chart import build_candles_with_volume_profile, build_ma_overlay_chart, build_structure_chart
 import watchlist
 import screener_alert
 import cpr
+import structure
 import fo_universe
 import telegram_bot
 
@@ -269,8 +270,8 @@ with st.sidebar:
     else:
         st.caption("Pick a symbol above first.")
 
-tab_screener, tab_stock_chart, tab_volume_profile, tab_cpr, tab_watchlist = st.tabs(
-    ["Screener", "🔍 Stock Chart", "Volume Profile", "🎯 Narrow CPR", "⭐ Watchlist"]
+tab_screener, tab_stock_chart, tab_volume_profile, tab_cpr, tab_structure, tab_watchlist = st.tabs(
+    ["Screener", "🔍 Stock Chart", "Volume Profile", "🎯 Narrow CPR", "📐 Market Structure", "⭐ Watchlist"]
 )
 
 with tab_screener:
@@ -938,6 +939,196 @@ with tab_cpr:
             f"Universe: {cpr_universe} | Width % range: [{cpr_width_gte}, {cpr_width_lt})",
         ],
         records=cpr_narrow_records,
+    )
+
+with tab_structure:
+    st.title("📐 Market Structure — Trend via Higher Highs / Higher Lows")
+    st.caption(
+        "Classic price-action swing structure: an **Uptrend** is a sequence of Higher Highs (HH) + "
+        "Higher Lows (HL); a **Downtrend** is Lower Highs (LH) + Lower Lows (LL). A **Character Change** "
+        "fires the moment price breaks the last swing that was holding the trend up (a Close below the "
+        "last Higher Low in an uptrend, or above the last Lower High in a downtrend) — a potential "
+        "reversal in progress. 'Uptrend'/'Downtrend' additionally require price to also be on the right "
+        f"side of BOTH the {structure.MA_FAST}- and {structure.MA_SLOW}-period MA (using the sidebar's "
+        "EMA/SMA setting) — structure alone can lag; this MA filter confirms the trend is live, not stale."
+    )
+
+    sc1, sc2, sc3 = st.columns([2, 2, 2])
+    with sc1:
+        structure_universe = st.selectbox("Universe", UNIVERSE_OPTIONS, index=0, key="structure_universe")
+    with sc2:
+        structure_tf_label = st.selectbox("Timeframe", TF_LABELS, index=DEFAULT_TF_INDEX, key="structure_tf")
+        structure_timeframe = TF_KEYS[TF_LABELS.index(structure_tf_label)]
+    with sc3:
+        structure_order = st.number_input(
+            "Swing strength (bars each side)", min_value=1, max_value=50, value=20, step=1,
+            key="structure_order",
+        )
+
+    sc4, sc5, sc6 = st.columns([2, 1, 1])
+    with sc4:
+        structure_search = st.text_input("Search stock", value="", key="structure_search")
+    with sc5:
+        structure_choch_lookback = st.number_input(
+            "\"Recent\" Character Change if within last N bars", min_value=1, max_value=50, value=5, step=1,
+            key="structure_choch_lookback",
+        )
+    with sc6:
+        structure_force_refresh = st.checkbox("Force-refresh price history", value=False, key="structure_force_refresh")
+
+    structure_run = st.button("Run Structure scan", type="primary", key="structure_run")
+
+    if structure_run:
+        structure_segments = UNIVERSES if structure_universe == ALL_UNIVERSE_LABEL else [structure_universe]
+        structure_symbols_df = get_all_symbols(structure_segments)
+        st.write(f"Scanning {len(structure_symbols_df)} symbols in {structure_universe} on {structure_tf_label}...")
+
+        structure_progress = st.progress(0.0)
+        structure_status = st.empty()
+        structure_start = time.time()
+
+        def _structure_cb(i, total, symbol):
+            structure_progress.progress((i + 1) / total)
+            structure_status.text(f"[{i+1}/{total}] {symbol}")
+
+        structure_results = structure.scan_universe_structure(
+            structure_symbols_df[["Symbol", "Segment"]], structure_timeframe, ma_type, int(structure_order),
+            int(structure_choch_lookback), progress_cb=_structure_cb, force_refresh=structure_force_refresh,
+        )
+        structure_elapsed = time.time() - structure_start
+        structure_status.text(f"Done in {structure_elapsed:.0f}s — "
+                               f"{len(structure_results)}/{len(structure_symbols_df)} symbols had usable data.")
+
+        st.session_state["structure_results"] = structure_results
+        st.session_state["structure_scanned_at"] = pd.Timestamp.now()
+        st.session_state["structure_scanned_universe"] = structure_universe
+        st.session_state["structure_scanned_tf"] = structure_tf_label
+        st.session_state["structure_scanned_ma"] = ma_type
+
+    structure_results = st.session_state.get("structure_results")
+    structure_records = []
+
+    if structure_results is None:
+        st.info("Set your filters above and click **Run Structure scan**. First run of the day is slower "
+                 "(full history fetch per stock); later runs reuse the local cache and are fast.")
+    elif structure_results.empty:
+        st.warning("No symbols returned usable data for this universe/filter combination.")
+    else:
+        scanned_ma = st.session_state["structure_scanned_ma"]
+        st.caption(
+            f"Last scanned: {st.session_state['structure_scanned_at']:%Y-%m-%d %H:%M} · "
+            f"{st.session_state['structure_scanned_universe']} · {st.session_state['structure_scanned_tf']} · "
+            f"{scanned_ma}"
+        )
+
+        sdf = structure_results.copy()
+        if structure_search.strip():
+            search_terms = structure_search.strip().lower().split()
+            symbol_lower = sdf["Symbol"].str.lower()
+            mask = pd.Series(True, index=sdf.index)
+            for term in search_terms:
+                mask &= symbol_lower.str.contains(term, na=False)
+            sdf = sdf[mask]
+
+        ma_fast_col, ma_slow_col = f"{scanned_ma}{structure.MA_FAST}", f"{scanned_ma}{structure.MA_SLOW}"
+        display_cols = ["Symbol", "Close", "AsOf", ma_fast_col, ma_slow_col, "Structure", "Signal", "Volume"]
+
+        def _fmt_structure(d):
+            out = d[display_cols].copy()
+            out["Close"] = out["Close"].round(2)
+            out[ma_fast_col] = out[ma_fast_col].round(2)
+            out[ma_slow_col] = out[ma_slow_col].round(2)
+            out["AsOf"] = _fmt_asof(out["AsOf"], structure_timeframe)
+            return out.sort_values(by="Symbol")
+
+        uptrend = sdf[sdf["Signal"] == "Uptrend"].copy()
+        downtrend = sdf[sdf["Signal"] == "Downtrend"].copy()
+        choch = sdf[sdf["Signal"].str.startswith("Character Change", na=False)].copy()
+        weak_up = sdf[sdf["Signal"].str.startswith("Uptrend (below", na=False)].copy()
+        weak_down = sdf[sdf["Signal"].str.startswith("Downtrend (above", na=False)].copy()
+        no_structure = sdf[sdf["Signal"] == "No clear structure"].copy()
+        no_hist = sdf[sdf["Signal"] == "Insufficient history"].copy()
+
+        st.subheader(f"🔄 Character Change — trend just flipped ({len(choch)})")
+        if choch.empty:
+            st.write(f"No Character Change events in the last {structure_choch_lookback} bars with these settings.")
+        else:
+            st.dataframe(_fmt_structure(choch), use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download Character Change list (CSV)",
+                _fmt_structure(choch).to_csv(index=False),
+                file_name=f"structure_choch_{structure_timeframe}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+            )
+
+        st.subheader(f"🟢 Uptrend — HH/HL, above {scanned_ma}{structure.MA_FAST}/{structure.MA_SLOW} ({len(uptrend)})")
+        if uptrend.empty:
+            st.write("No confirmed uptrends with these settings.")
+        else:
+            st.dataframe(_fmt_structure(uptrend), use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download Uptrend list (CSV)",
+                _fmt_structure(uptrend).to_csv(index=False),
+                file_name=f"structure_uptrend_{structure_timeframe}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+            )
+            structure_records = _fmt_structure(uptrend)[["Symbol", "Close", "Structure", "Signal"]].to_dict("records")
+
+        st.subheader(f"🔴 Downtrend — LH/LL, below {scanned_ma}{structure.MA_FAST}/{structure.MA_SLOW} ({len(downtrend)})")
+        if downtrend.empty:
+            st.write("No confirmed downtrends with these settings.")
+        else:
+            st.dataframe(_fmt_structure(downtrend), use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download Downtrend list (CSV)",
+                _fmt_structure(downtrend).to_csv(index=False),
+                file_name=f"structure_downtrend_{structure_timeframe}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+            )
+
+        with st.expander(f"Uptrend structure, but below {scanned_ma}{structure.MA_FAST}/{structure.MA_SLOW} ({len(weak_up)})"):
+            st.dataframe(_fmt_structure(weak_up) if not weak_up.empty else pd.DataFrame(),
+                         use_container_width=True, hide_index=True)
+        with st.expander(f"Downtrend structure, but above {scanned_ma}{structure.MA_FAST}/{structure.MA_SLOW} ({len(weak_down)})"):
+            st.dataframe(_fmt_structure(weak_down) if not weak_down.empty else pd.DataFrame(),
+                         use_container_width=True, hide_index=True)
+        with st.expander(f"No clear structure ({len(no_structure)})"):
+            st.dataframe(_fmt_structure(no_structure) if not no_structure.empty else pd.DataFrame(),
+                         use_container_width=True, hide_index=True)
+        with st.expander(f"Insufficient history ({len(no_hist)})"):
+            st.dataframe(no_hist[["Symbol", "AsOf"]] if not no_hist.empty else pd.DataFrame(),
+                         use_container_width=True, hide_index=True)
+
+        with st.expander(f"📈 View swing chart for a stock in these results ({len(sdf)} scanned)", expanded=False):
+            structure_chart_symbols = sorted(sdf["Symbol"].unique().tolist())
+            sc_c1, sc_c2 = st.columns([3, 1])
+            with sc_c1:
+                structure_chart_pick = st.selectbox("Pick a symbol to chart", structure_chart_symbols,
+                                                     key="structure_chart_pick")
+            with sc_c2:
+                structure_chart_bars = st.number_input("Bars to show", min_value=50, max_value=1000, value=250,
+                                                        step=25, key="structure_chart_bars")
+            if st.button(f"📈 Show chart for {structure_chart_pick}", key="structure_chart_show"):
+                st.session_state["structure_chart_shown"] = structure_chart_pick
+
+            structure_shown_symbol = st.session_state.get("structure_chart_shown")
+            if structure_shown_symbol:
+                with st.spinner(f"Fetching {structure_shown_symbol}..."):
+                    structure_full = load_frame(structure_shown_symbol, structure_timeframe,
+                                                 force_refresh=structure_force_refresh)
+                if structure_full is None or structure_full.empty:
+                    st.error(f"Couldn't fetch usable data for {structure_shown_symbol} on {structure_tf_label}.")
+                else:
+                    structure_fig = build_structure_chart(structure_full, structure_shown_symbol, structure_tf_label,
+                                                            int(structure_order), display_bars=int(structure_chart_bars))
+                    st.plotly_chart(structure_fig, use_container_width=True, key="structure_fig",
+                                     config={'scrollZoom': True})
+
+    render_telegram_send_button(
+        "structure",
+        header_lines=[
+            f"{datetime.now():%d-%b-%Y %H:%M} IST",
+            "📐 Market Structure snapshot — Uptrends",
+            f"Universe: {structure_universe} | Timeframe: {structure_tf_label}",
+        ],
+        records=structure_records,
     )
 
 with tab_watchlist:
