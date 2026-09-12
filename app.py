@@ -47,7 +47,7 @@ import telegram_bot
 import backtest
 import cpr_ema_backtest
 import swing_backtest
-import fab4_backtest
+import momentum_backtest
 import call_log
 
 st.set_page_config(page_title="TrendLine", layout="wide")
@@ -1147,8 +1147,8 @@ with tab_structure:
 
 with tab_backtest:
     st.title("🧪 Backtest")
-    bt_strategy = st.radio("Strategy", ["Golden Cross", "CPR + EMA", "Swing Strategy", "FAB 4"], horizontal=True,
-                            key="bt_strategy")
+    bt_strategy = st.radio("Strategy", ["Golden Cross", "CPR + EMA", "Swing Strategy", "Momentum Screener"],
+                            horizontal=True, key="bt_strategy")
     st.divider()
 
 if bt_strategy == "Golden Cross":
@@ -1447,100 +1447,117 @@ elif bt_strategy == "Swing Strategy":
             file_name=f"swing_backtest_{swbt_strategy_key}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
         )
 
-elif bt_strategy == "FAB 4":
+elif bt_strategy == "Momentum Screener":
   with tab_backtest:
-    st.subheader("FAB 4 (\"Fabulous Four\") Backtest")
+    st.subheader("Momentum Screener Backtest")
     st.caption(
-        "Location-based intraday strategy: before the open, box in the highest and lowest of "
-        "{20-day SMA, 200-day SMA, prior close, prior day's last ~45-min high/low range} — that "
-        "box is the FAB4 block. Today opens above it → long-only bias for the day; opens below → "
-        "short-only; opens inside → sit out, location is ambiguous. Then the \"color game\": on any "
-        "bar (any color), mark its extreme in the bias direction — the next bar that breaks that "
-        "level is your entry, stop at that triggering bar's opposite extreme (risk one bar). Repeats "
-        "through the day for multiple legs."
+        "**Daily**: yesterday's volume > 1.5× the 20-day average, price ₹50–₹5000, ATR(14)/price "
+        "> 1.5%, close above both the 20-day and 50-day SMA, RSI(14) between 40–70, and 5-day "
+        "return beats the Nifty 50's 5-day return. **Weekly**: a separate rule set — 20-week SMA "
+        "> 200-week SMA, weekly volume > the 20-week average, weekly RSI(14) between 45–65."
     )
     st.warning(
-        "**Two deviations from the source video, both necessary and documented in fab4_backtest.py:** "
-        "runs on 5-min bars, not 2-min (Yahoo's free feed doesn't offer 2-min history at all); and "
-        "since the video never specifies an exit beyond \"risk one bar for the chance of winning "
-        "many,\" this adds a trailing stop (ratchets on each new trend-confirming bar) plus a "
-        "per-direction max-legs-per-day cap, forced flat at session close. Also: Yahoo only retains "
-        "60 days of 5-min history, so this backtest can only ever cover the last ~60 trading days, "
-        "not a multi-year window like the other three."
+        "The screener only defines entry conditions, not an exit — this reuses the same house-style "
+        "exit as the Swing Strategy backtest for consistency: stop-loss = Entry − 1.5× ATR(14), skip "
+        "the trade if that implies >4.5% risk, target = max(2× actual risk, 5%)."
     )
 
-    fab4_universe = st.multiselect(
+    mom_mode_label = st.radio("Which mode", ["Daily", "Weekly", "Both"], horizontal=True, key="mom_mode_label")
+    mom_mode_key = {"Daily": "daily", "Weekly": "weekly", "Both": "both"}[mom_mode_label]
+
+    mom_universes = st.multiselect(
         "Universe", ["Nifty 100 (Large Cap)", "Nifty Midcap 150", "Nifty Smallcap 250"],
-        default=["Nifty 100 (Large Cap)"], key="fab4_universe",
+        default=["Nifty 100 (Large Cap)", "Nifty Midcap 150"], key="mom_universes",
     )
-    fab4_force_refresh = st.checkbox("Force-refresh price history (ignore cache)", key="fab4_force_refresh")
 
-    if st.button("▶️ Run FAB 4 Backtest", type="primary"):
-        if not fab4_universe:
+    mom_col1, mom_col2, mom_col3 = st.columns(3)
+    mom_start_date = mom_col1.date_input("Start date", value=pd.Timestamp("2020-01-01"), key="mom_start_date")
+    mom_risk_per_trade = mom_col2.number_input(
+        "Portfolio sim: risk % of capital per trade", min_value=0.1, max_value=5.0, value=1.0, step=0.1,
+        key="mom_risk_per_trade",
+    )
+    mom_max_concurrent = mom_col3.number_input(
+        "Portfolio sim: max concurrent positions", min_value=1, max_value=100, value=20, step=1,
+        key="mom_max_concurrent",
+    )
+    mom_force_refresh = st.checkbox("Force-refresh price history (ignore cache)", key="mom_force_refresh")
+
+    if st.button("▶️ Run Momentum Screener Backtest", type="primary"):
+        if not mom_universes:
             st.warning("Pick at least one universe first.")
         else:
-            fab4_symbols_df = get_all_symbols(fab4_universe, force_refresh=fab4_force_refresh)[["Symbol", "Segment"]]
-            fab4_symbols = list(fab4_symbols_df.itertuples(index=False, name=None))
+            mom_symbols_df = get_all_symbols(mom_universes, force_refresh=mom_force_refresh)[["Symbol", "Segment"]]
+            mom_symbols = list(mom_symbols_df.itertuples(index=False, name=None))
 
-            fab4_progress = st.progress(0.0)
-            fab4_status = st.empty()
-            fab4_start = time.time()
+            mom_progress = st.progress(0.0)
+            mom_status = st.empty()
+            mom_start = time.time()
 
-            def _fab4_cb(i, total, symbol):
-                fab4_progress.progress((i + 1) / total)
-                fab4_status.text(f"[{i+1}/{total}] {symbol}")
+            def _mom_cb(i, total, symbol):
+                mom_progress.progress((i + 1) / total)
+                mom_status.text(f"[{i+1}/{total}] {symbol}")
 
-            fab4_trades = fab4_backtest.run_backtest(fab4_symbols, progress_cb=_fab4_cb,
-                                                       force_refresh=fab4_force_refresh)
-            fab4_elapsed = time.time() - fab4_start
-            fab4_status.text(f"Done in {fab4_elapsed:.0f}s — {len(fab4_trades)} trade(s) generated.")
+            mom_trades = momentum_backtest.run_backtest(
+                mom_mode_key, mom_symbols, start_date=str(mom_start_date), progress_cb=_mom_cb,
+                force_refresh=mom_force_refresh,
+            )
+            mom_elapsed = time.time() - mom_start
+            mom_status.text(f"Done in {mom_elapsed:.0f}s — {len(mom_trades)} trade(s) generated.")
 
-            st.session_state["fab4_trades"] = fab4_trades
-            st.session_state["fab4_ran_at"] = pd.Timestamp.now()
+            st.session_state["mom_trades"] = mom_trades
+            st.session_state["mom_ran_at"] = pd.Timestamp.now()
 
-    fab4_trades = st.session_state.get("fab4_trades")
+    mom_trades = st.session_state.get("mom_trades")
 
-    if fab4_trades is None:
-        st.info("Click **Run FAB 4 Backtest** above. First run is slow (5-min history fetch per "
-                 "stock); later runs reuse the local cache and are fast.")
-    elif fab4_trades.empty:
-        st.warning("No qualifying trades for this universe (no day had a clean above/below-block "
-                    "open, or no color-game trigger fired).")
+    if mom_trades is None:
+        st.info("Click **Run Momentum Screener Backtest** above. First run is slow (full history "
+                 "fetch per stock); later runs reuse the local cache and are fast.")
+    elif mom_trades.empty:
+        st.warning("No qualifying trades for this universe/date range — this is a strict multi-"
+                    "condition filter, so few or zero hits on a given universe/period is expected, "
+                    "not necessarily a bug.")
     else:
-        st.caption(f"Last run: {st.session_state['fab4_ran_at']:%Y-%m-%d %H:%M}")
+        st.caption(f"Last run: {st.session_state['mom_ran_at']:%Y-%m-%d %H:%M}")
 
-        fab4_summary = fab4_backtest.summarize(fab4_trades)
-        fab4_c1, fab4_c2, fab4_c3, fab4_c4 = st.columns(4)
-        fab4_c1.metric("Total trades", fab4_summary["total_trades"])
-        fab4_c2.metric("Win rate", f"{fab4_summary['win_rate_pct']:.1f}%"
-                        if pd.notna(fab4_summary["win_rate_pct"]) else "—")
-        fab4_c3.metric("Avg return / trade", f"{fab4_summary['avg_return_pct']:.3f}%"
-                        if pd.notna(fab4_summary["avg_return_pct"]) else "—")
-        fab4_c4.metric("Max drawdown", f"{fab4_summary['max_drawdown_pct']:.2f}%"
-                        if pd.notna(fab4_summary["max_drawdown_pct"]) else "—")
-        st.caption(
-            f"Avg winner: {fab4_summary['avg_win_pct']:.3f}% · Avg loser: {fab4_summary['avg_loss_pct']:.3f}% "
-            f"· Long/Short split: {(fab4_trades['Direction'] == 'Long').sum()} / "
-            f"{(fab4_trades['Direction'] == 'Short').sum()} "
-            "· Drawdown is on an equity curve that compounds each trade in entry-time order "
-            "(a simplification — in reality multiple symbols can be in a trade at once)."
-        )
+        for mom_label in mom_trades["Strategy"].unique():
+            mom_sub = mom_trades[mom_trades["Strategy"] == mom_label]
+            mom_summary = momentum_backtest.summarize(mom_sub)
+            mom_port = momentum_backtest.simulate_portfolio(
+                mom_sub, risk_per_trade_pct=mom_risk_per_trade, max_concurrent=int(mom_max_concurrent),
+            )
 
-        fab4_equity = (1 + fab4_trades.sort_values("EntryTime")["ReturnPct"] / 100).cumprod()
-        fab4_fig = go.Figure()
-        fab4_fig.add_trace(go.Scatter(
-            x=fab4_trades.sort_values("EntryTime")["EntryTime"], y=fab4_equity,
-            mode="lines", name="Equity (x initial capital)",
-        ))
-        fab4_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10),
-                                yaxis_title="Equity multiple", xaxis_title="Entry time")
-        st.plotly_chart(fab4_fig, use_container_width=True)
+            st.markdown(f"#### {mom_label}")
+            mom_c1, mom_c2, mom_c3, mom_c4, mom_c5 = st.columns(5)
+            mom_c1.metric("Closed trades", mom_summary["closed_trades"])
+            mom_c2.metric("Win rate", f"{mom_summary['win_rate_pct']:.1f}%"
+                          if pd.notna(mom_summary["win_rate_pct"]) else "—")
+            mom_c3.metric("Expectancy / trade", f"{mom_summary['expectancy_pct']:.2f}%"
+                          if pd.notna(mom_summary["expectancy_pct"]) else "—")
+            mom_c4.metric("Portfolio return", f"{mom_port['total_return_pct']:.1f}%",
+                          help=f"Started at 100, risking {mom_risk_per_trade}% per trade, "
+                               f"max {int(mom_max_concurrent)} concurrent, no leverage.")
+            mom_c5.metric("Portfolio max drawdown", f"{mom_port['max_drawdown_pct']:.2f}%"
+                          if pd.notna(mom_port["max_drawdown_pct"]) else "—")
+            st.caption(
+                f"Avg winner: {mom_summary['avg_win_pct']:.2f}% · Avg loser: {mom_summary['avg_loss_pct']:.2f}% "
+                f"· Trades taken: {mom_port['trades_taken']} · skipped (no free slot): {mom_port['trades_skipped']}"
+            )
+
+            if not mom_port["equity_curve"].empty:
+                mom_fig = go.Figure()
+                mom_fig.add_trace(go.Scatter(
+                    x=mom_port["equity_curve"].index, y=mom_port["equity_curve"].values,
+                    mode="lines", name="Capital",
+                ))
+                mom_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10),
+                                       yaxis_title="Capital (started at 100)", xaxis_title="Exit date")
+                st.plotly_chart(mom_fig, use_container_width=True)
 
         st.subheader("Trades")
-        st.dataframe(fab4_trades, use_container_width=True, hide_index=True)
+        st.dataframe(mom_trades, use_container_width=True, hide_index=True)
         st.download_button(
-            "Download all trades (CSV)", fab4_trades.to_csv(index=False),
-            file_name=f"fab4_backtest_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+            "Download all trades (CSV)", mom_trades.to_csv(index=False),
+            file_name=f"momentum_backtest_{mom_mode_key}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
         )
 
 with tab_calls:
