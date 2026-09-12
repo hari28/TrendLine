@@ -5,14 +5,14 @@ Streamlit process. Invoke with the venv's python, e.g.:
     venv/bin/python3 check_watchlist.py
 
 Runs several things, all gated to NSE-relevant hours (IST) so it's harmless
-to leave the launchd job loaded permanently -- see README.md "Watchlist
-Alerts" and "Universe Digest" for details:
-  1. The per-symbol Watchlist check (watchlist.py) -- only during live
-     trading hours (Mon-Fri 9:15-15:30).
-  2. The full-universe scan digest (universe_digest.py) -- during trading
+to leave the launchd job loaded permanently -- see README.md "Universe
+Digest" for details:
+  1. The full-universe scan digest (universe_digest.py) -- during trading
      hours for its 15-Minute/1-Hour combos, plus a short window after close
      (15:30-16:00) for its once-daily 1D/1W/1M combos. It self-gates its own
      cadence internally, so it's safe to call every cycle.
+  2. The ad-hoc "alert me on this scan" cycle (screener_alert.py) -- only
+     during live trading hours (Mon-Fri 9:15-15:30).
   3. Paper trading (paper_trading.py) -- the two intraday Iron Condor
      strategies are checked every cycle during trading hours (they need to
      react to same-day entry/exit windows); the six daily/weekly equity
@@ -36,7 +36,6 @@ sys.path.insert(0, PROJECT_ROOT)  # ensure local imports resolve regardless of l
 from dotenv import load_dotenv
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
-import watchlist
 import universe_digest
 import screener_alert
 import cpr_alert
@@ -98,20 +97,13 @@ def main():
         parts = [f"{now_ist:%Y-%m-%d %H:%M:%S %z}"]
 
         if _is_trading_hours(now_ist):
-            results = watchlist.check_all(send_alerts=True)
-            triggered = [r for r in results if r.get("triggered")]
-            failed = [r for r in results if not r.get("ok")]
-            sent = sum(1 for r in triggered if r.get("alert_sent"))
-            parts.append(f"watchlist: checked={len(results)} triggered={len(triggered)} "
-                         f"alerts_sent={sent} failed={len(failed)}")
-
             screener_alert_result = screener_alert.run_cycle(now_ist)
             if screener_alert_result["ran"]:
                 parts.append(f"screener_alert: sent={screener_alert_result['sent']}")
             else:
                 parts.append(f"screener_alert: skipped ({screener_alert_result['reason']})")
         else:
-            parts.append("watchlist: skipped (outside trading hours)")
+            parts.append("screener_alert: skipped (outside trading hours)")
 
         digest = universe_digest.run_cycle(now_ist, send_alerts=True)
         if digest["ran"]:

@@ -183,28 +183,7 @@ box-zoom into a range, and double-click to reset back to the full view.
 or press Control+C (Ctrl+C on Windows) inside it. Closing the browser tab
 alone does not stop the server.
 
-## Watchlist Alerts
-
-A 4th tab, **⭐ Watchlist**, lets you save symbols with whatever Scan type +
-settings are currently selected in the sidebar (timeframe, MA type, band/
-lookback/spike/pattern params) at the moment you add them — that saved rule is
-what gets re-checked later, since the background checker below runs headless
-with no sidebar to read.
-
-**Add a symbol:** pick it in the sidebar's 🔍 Search box, then click
-"➕ Add {symbol} (current scan settings)" just below it.
-
-**In the Watchlist tab:** a table shows each entry's current status (a live,
-read-only check — it never sends alerts just from opening the tab), a remove
-control, and a "📲 Check now & send alerts" button that runs the exact same
-check-and-alert logic as the background job, synchronously — useful for
-testing delivery without waiting for the schedule. Alerts only fire on a
-symbol's condition *newly* triggering (e.g. just entered Golden Cross), not
-every time a check finds it still true. The very first check after adding a
-symbol never alerts either — it just records a baseline — so if you add a
-symbol that's already in a triggering state, don't expect an immediate alert.
-
-### Setting up Telegram alerts (active by default)
+## Setting up Telegram alerts (active by default)
 
 Alerts are posted into a Telegram group via a bot, using `telegram_bot.py`.
 Setup, one time:
@@ -231,11 +210,10 @@ Unlike WhatsApp (below), Telegram bot tokens don't expire and there's no
 
 `whatsapp.py` implements the same alert-sending contract via Meta's official
 WhatsApp Cloud API, and is fully working if you set up credentials for it —
-it's just not the module `watchlist.py` currently imports (that's
-`telegram_bot.py`). To switch back, change the import in `watchlist.py` from
-`from telegram_bot import send_telegram_message` to
-`from whatsapp import send_whatsapp_message` (and update the one call site
-that uses it).
+it's just not what the alert modules (`universe_digest.py`, `cpr_alert.py`,
+`screener_alert.py`) currently import (that's `telegram_bot.py`). To switch
+back, change each module's `from telegram_bot import send_telegram_message`
+to `from whatsapp import send_whatsapp_message` and update its call site.
 
 If you do switch to it: create a [Meta developer account](https://developers.facebook.com/),
 add the **WhatsApp** product to an App, grab the **Phone Number ID** and an
@@ -248,10 +226,9 @@ only deliver within 24 hours of the recipient last messaging the business
 number (send it a WhatsApp message first to open that window, or use an
 approved Message Template for reliable unattended delivery).
 
-### Universe Digest — scanning everyone, not just your watchlist
+### Universe Digest — the full universe, every scan mode
 
-Separate from the per-symbol Watchlist above, `universe_digest.py` scans the
-**entire "All" universe** (Nifty 100 + Midcap 150 + Smallcap 250 combined,
+`universe_digest.py` scans the **entire "All" universe** (Nifty 100 + Midcap 150 + Smallcap 250 combined,
 ~500 stocks — scanning Large/Mid/Small separately as well would just be
 redundant, since All is their union) across **all four scan modes** (Above
 200 MA, Golden/Death Cross, Unusual Volume, Chart Patterns), and posts a
@@ -275,7 +252,7 @@ on its own cadence rather than all together every 15 minutes:
   fetch per symbol (1W/1M are resampled from the same daily bars), so this
   isn't 3x the work it sounds like.
 
-Like the per-symbol Watchlist, the **first-ever check of each combo never
+The **first-ever check of each combo never
 alerts** — it just records a baseline, so you won't get a flood of "hits"
 covering everything already qualifying on first deploy. Only genuinely new
 matches after that fire an alert. State lives in
@@ -310,7 +287,7 @@ first check only records a baseline and never fires. State lives in
 The Streamlit app only checks things while it's open. To get alerts even
 when the app is closed (as long as your Mac is on), install the included
 launchd job — it runs `check_watchlist.py` every 15 minutes, which handles
-both the per-symbol Watchlist check and the Universe Digest above (each
+the Universe Digest, the CPR Alert, and the ad-hoc screener alert (each
 self-gated to its own relevant hours), so it's harmless to leave loaded
 permanently.
 
@@ -331,11 +308,11 @@ To stop it:
 launchctl unload ~/Library/LaunchAgents/com.trendline.watchlist.plist
 ```
 
-Logs: `data/watchlist_check.log` (one line per run, covering the per-symbol
-Watchlist, the Universe Digest, and the CPR Alert — checked/triggered/sent/failed
-counts for the first, hits/messages_sent/which cadence buckets ran for the
-second, hits/messages_sent for the third; each part shows "skipped" when
-outside its relevant hours), plus
+Logs: `data/watchlist_check.log` (one line per run, covering the Universe
+Digest, the CPR Alert, and the ad-hoc screener alert — hits/messages_sent/
+which cadence buckets ran for the first, hits/messages_sent for the second,
+sent/skipped for the third; each part shows "skipped" when outside its
+relevant hours), plus
 `data/launchd_stdout.log` / `data/launchd_stderr.log` for anything the script
 itself printed or crashed on. None of these logs rotate — fine for a
 single-user local tool, but they'll grow unboundedly over time.
@@ -363,6 +340,6 @@ single-user local tool, but they'll grow unboundedly over time.
   deals vs. history). It does not size positions, place stops, or manage
   risk — apply your own entry/exit discipline before acting on anything it
   surfaces.
-- `data/watchlist.json` and `data/watchlist_state.json` persist across app
-  restarts (unlike `st.session_state`, which is wiped every time) — see
-  "Watchlist Alerts" above.
+- `data/universe_digest_state.json` and `data/cpr_state.json` persist across
+  app restarts (unlike `st.session_state`, which is wiped every time) — see
+  "Universe Digest" and "CPR Alert" above.

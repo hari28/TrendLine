@@ -38,7 +38,6 @@ from screener import (scan_universe, apply_band, apply_band_below, scan_universe
 from indicators import TIMEFRAMES
 from market_data import get_fii_dii_activity, deals_for_symbols
 from chart import build_candles_with_volume_profile, build_ma_overlay_chart, build_structure_chart
-import watchlist
 import screener_alert
 import cpr
 import structure
@@ -266,23 +265,10 @@ with st.sidebar:
     st.caption("Any symbol or index, all universes. Opens in the Stock Chart tab, using the settings above.")
     searched_symbol = st.selectbox("Symbol", [""] + all_symbols_sorted, index=0, key="global_search_symbol")
 
-    st.divider()
-    st.subheader("⭐ Add to watchlist")
-    if searched_symbol:
-        if st.button(f"➕ Add {searched_symbol} (current scan settings)", use_container_width=True):
-            mode_code = watchlist.SCAN_MODE_CODES[scan_mode]
-            wl_params = _current_scan_params(scan_mode, band_low, band_high, lookback, avg_period,
-                                              spike_multiple, pattern_types, pattern_lookback, pole_min_move_pct)
-            seg = all_universe_symbols.loc[all_universe_symbols["Symbol"] == searched_symbol, "Segment"].iloc[0]
-            watchlist.add_entry(searched_symbol, seg, universe_choice, timeframe, ma_type, mode_code, wl_params)
-            st.success(f"Added {searched_symbol} — will watch for: {scan_mode}.")
-    else:
-        st.caption("Pick a symbol above first.")
-
 (tab_screener, tab_stock_chart, tab_volume_profile, tab_cpr, tab_structure, tab_iron_condor, tab_backtest,
- tab_calls, tab_paper, tab_watchlist) = st.tabs(
+ tab_calls, tab_paper) = st.tabs(
     ["Screener", "🔍 Stock Chart", "Volume Profile", "🎯 Narrow CPR", "📐 Market Structure", "🦅 Iron Condor",
-     "🧪 Backtest", "📞 Call Performance", "📝 Paper Trading", "⭐ Watchlist"]
+     "🧪 Backtest", "📞 Call Performance", "📝 Paper Trading"]
 )
 
 with tab_screener:
@@ -2055,59 +2041,3 @@ with tab_paper:
             "Download trades (CSV)", pt_trades.to_csv(index=False),
             file_name=f"paper_trading_{pt_selected}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
         )
-
-with tab_watchlist:
-    st.title("⭐ Watchlist")
-    st.caption(
-        "Each symbol keeps the scan rule it was added with (from the sidebar's settings at the "
-        "time you added it). Status below is a live, read-only check — it never sends alerts on "
-        "page load. Real alerts come from the background launchd job (see README), or on-demand "
-        "with the button below."
-    )
-
-    wl_entries = watchlist.load_watchlist()
-    if not wl_entries:
-        st.info("No symbols yet. Use the 🔍 Search box in the sidebar to pick a symbol, then "
-                 "'➕ Add to watchlist' below it — it saves whichever Scan type and settings are "
-                 "currently selected in the sidebar.")
-    else:
-        wl_rows = []
-        for wl_entry in wl_entries:
-            wl_result = watchlist.evaluate_entry(wl_entry)
-            wl_rows.append({
-                "Symbol": wl_entry["symbol"],
-                "Scan mode": watchlist.SCAN_MODE_LABELS.get(wl_entry["scan_mode"], wl_entry["scan_mode"]),
-                "Timeframe": TIMEFRAMES[wl_entry["timeframe"]]["label"],
-                "MA": wl_entry["ma_type"],
-                "Status": wl_result["status"] if wl_result["ok"] else f"ERROR: {wl_result.get('reason')}",
-                "Added": wl_entry["added_at"],
-            })
-        st.dataframe(pd.DataFrame(wl_rows), use_container_width=True, hide_index=True)
-
-        st.divider()
-        wl_remove_choice = st.selectbox("Remove a symbol", [""] + [e["symbol"] for e in wl_entries],
-                                         key="wl_remove_choice")
-        if wl_remove_choice and st.button(f"🗑️ Remove {wl_remove_choice}"):
-            wl_eid = next(e["id"] for e in wl_entries if e["symbol"] == wl_remove_choice)
-            watchlist.remove_entry(wl_eid)
-            st.rerun()
-
-        st.divider()
-        st.subheader("📲 Send to Telegram")
-        st.caption(
-            "Runs the exact same check-and-alert logic as the background launchd job, synchronously "
-            "— useful to test Telegram delivery without waiting for the next scheduled run. Only "
-            "sends for a symbol whose condition newly triggered since the last check (not every time "
-            "it stays true)."
-        )
-        if st.button("📲 Check now & send alerts", type="primary"):
-            with st.spinner("Checking all watchlist entries..."):
-                wl_check_results = watchlist.check_all(send_alerts=True)
-            wl_triggered = [r for r in wl_check_results if r.get("triggered")]
-            st.success(f"Checked {len(wl_check_results)} entries — {len(wl_triggered)} new alert(s) sent.")
-            if wl_triggered:
-                st.dataframe(
-                    pd.DataFrame([{"Symbol": r["entry"]["symbol"], "Status": r["status"],
-                                    "Telegram sent": r.get("alert_sent", False)} for r in wl_triggered]),
-                    use_container_width=True, hide_index=True,
-                )
