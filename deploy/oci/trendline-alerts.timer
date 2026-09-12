@@ -1,0 +1,14 @@
+# Fires trendline-alerts.service every 15 minutes, round the clock -- the
+# script itself skips instantly outside Mon-Fri 09:15-16:00 IST, same as the
+# old launchd job. systemd never overlaps runs: if a cycle is still going
+# when the next tick comes, that tick is skipped.
+[Unit]
+Description=Run TrendLine alert cycle every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+AccuracySec=30s
+Unit=trendline-alerts.service
+
+[Install]
+WantedBy=timers.target

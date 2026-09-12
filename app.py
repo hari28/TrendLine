@@ -48,6 +48,9 @@ import backtest
 import cpr_ema_backtest
 import swing_backtest
 import momentum_backtest
+import iron_condor_backtest
+import iron_condor_range_backtest
+import paper_trading
 import call_log
 
 st.set_page_config(page_title="TrendLine", layout="wide")
@@ -276,10 +279,10 @@ with st.sidebar:
     else:
         st.caption("Pick a symbol above first.")
 
-(tab_screener, tab_stock_chart, tab_volume_profile, tab_cpr, tab_structure, tab_backtest, tab_calls,
- tab_watchlist) = st.tabs(
-    ["Screener", "🔍 Stock Chart", "Volume Profile", "🎯 Narrow CPR", "📐 Market Structure", "🧪 Backtest",
-     "📞 Call Performance", "⭐ Watchlist"]
+(tab_screener, tab_stock_chart, tab_volume_profile, tab_cpr, tab_structure, tab_iron_condor, tab_backtest,
+ tab_calls, tab_paper, tab_watchlist) = st.tabs(
+    ["Screener", "🔍 Stock Chart", "Volume Profile", "🎯 Narrow CPR", "📐 Market Structure", "🦅 Iron Condor",
+     "🧪 Backtest", "📞 Call Performance", "📝 Paper Trading", "⭐ Watchlist"]
 )
 
 with tab_screener:
@@ -1145,10 +1148,146 @@ with tab_structure:
         records=structure_records,
     )
 
+with tab_iron_condor:
+    st.title("🦅 Intraday Iron Condor")
+    st.caption(
+        "An intraday, defined-risk options-selling strategy on Nifty 50 / Bank Nifty weekly options — "
+        "sell a high-probability OTM call and put, buy further-OTM options as insurance, and be flat "
+        "before the close every single day."
+    )
+
+    st.warning(
+        "**TrendLine has no real options-chain data source** (no strikes, no live premiums, no IV, no "
+        "Greeks — Yahoo doesn't serve NSE index options). Everything below is a **Black-Scholes model** "
+        "fed by the actual index price history, using trailing realized volatility as a stand-in for "
+        "implied volatility. Treat this as a way to gut-check the strategy's shape, not as a source of "
+        "tradeable prices — always cross-check strikes and premiums against your broker's live option "
+        "chain before placing a real order."
+    )
+
+    st.markdown("### How it works")
+
+    st.markdown("""
+**1. Instrument & timing**
+- Nifty 50 or Bank Nifty **weekly options**, traded on the day of expiry itself (0DTE) — this is what
+  makes it genuinely *intraday*: same-day expiry means the position is naturally flat by the close,
+  with no overnight gap risk.
+
+**2. Entry — around 09:45 AM**
+- Wait out the first ~30 minutes of opening volatility before selecting strikes.
+- Sell a **Call** and a **Put**, each roughly **15–20 delta** (≈80–85% statistical probability of
+  expiring worthless) — these are the "Short Call" and "Short Put".
+- Buy one further-OTM Call and one further-OTM Put as protection, spread-width away from each short
+  strike — these cap your maximum possible loss on the trade *before you even enter it*. This 4-leg
+  structure is the **Iron Condor**.
+- Only take the trade if the credit collected is worth it relative to the spread width (roughly a third
+  of the width or more) — skip the day if premiums are too thin.
+
+**3. Exit — whichever comes first**
+- **Stop-loss**: if the cost to close the position (buy back the shorts, sell the longs) reaches about
+  **1.5–2× the credit you collected**, exit immediately. Don't wait for the full defined-risk max loss
+  to play out — this keeps your average loss well inside the theoretical worst case.
+- **Time-based exit**: square off everything by **3:15 PM**, every day, no exceptions. This is what
+  guarantees zero overnight risk.
+
+**4. Position sizing — the actual lever that controls drawdown**
+- Risk a small, fixed % of capital per trade (e.g. 1%), sized off that trade's own defined max loss.
+- This is what turns "occasional losing trade" into "5–10% portfolio drawdown" instead of a blown
+  account — even several losses in a row stay bounded by construction, since no single trade can ever
+  cost more than its position-sized share of capital.
+
+**Why this combination targets >50% win rate with controlled drawdown**: selling 15–20 delta strikes
+gives a naturally high win rate (you need the index to *break* a boundary to lose, not just move) — the
+defined-risk hedge and the stop-loss are what keep the *size* of a loss bounded when it does happen,
+and position sizing is what keeps a string of bounded losses from ever becoming a large drawdown.
+    """)
+
+    st.divider()
+    st.markdown("### Variant: Non-Expiry Day (Range) Iron Condor")
+    st.caption(
+        "0DTE only trades one day a week (expiry day). This variant fills the other days by harvesting "
+        "a *different* edge — since there's barely any theta decay with days still left, it instead "
+        "targets **intraday volatility crush** (implied vol is typically elevated at the open and "
+        "compresses through the morning) and **range containment**, sized off the recent average daily "
+        "range instead of delta."
+    )
+    st.markdown("""
+**Entry — ~09:45 AM, on any day that is NOT the chosen expiry weekday**
+- Short strikes set at the day's open ± the recent 10-day average daily range (not delta-based — delta
+  on a multi-day option barely moves within one session, so it's not a useful strike-selection tool here)
+- Same Iron Condor hedge structure (buy further-OTM Call/Put to cap max loss)
+
+**Exit — whichever comes first**
+- **Time-based**: flat by **~1:15 PM** — earlier than 0DTE's 3:15 PM, since the vol-crush edge is
+  front-loaded to the first half of the session; holding longer adds days-to-expiry risk for no extra edge
+- **Stop-loss**: ≈1.4× the credit collected
+
+**A real finding from backtesting this, not a design choice**: 1-day-to-expiry entries performed far
+worse than 2-4 day entries (credit shrinks a lot at 1 day left while full-session range risk doesn't) —
+so entries with fewer than 2 days to expiry are skipped by default.
+    """)
+    st.warning(
+        "**This strategy is regime-dependent** — like any non-directional premium-selling approach, it "
+        "profits when the index stays range-bound and loses when it trends hard in one direction. "
+        "Backtesting found exactly this split: Nifty 50 (relatively range-bound in the tested window) "
+        "showed a 94% win rate, while Bank Nifty (which trended down hard in the same window) showed "
+        "only 34%, with the short put side getting run over repeatedly. This isn't a bug — it's the "
+        "genuine risk of the strategy, and it's exactly why position sizing (not the win rate alone) is "
+        "what actually protects your capital."
+    )
+
+    st.divider()
+    st.markdown("### Today's model strikes (Black-Scholes, not live market prices)")
+
+    ic_col1, ic_col2 = st.columns(2)
+    ic_symbol = ic_col1.selectbox("Index", list(iron_condor_backtest.INSTRUMENT_CONFIG.keys()), key="ic_symbol")
+    ic_weekday = ic_col2.selectbox("Weekly expiry weekday for this index",
+                                    list(iron_condor_backtest.EXPIRY_WEEKDAY_MAP.keys()), index=3, key="ic_weekday")
+
+    if st.button("Compute today's model strikes", key="ic_compute"):
+        ic_daily = load_frame(ic_symbol, "1D", force_refresh=False)
+        ic_intraday = load_frame(ic_symbol, "15MIN", force_refresh=False)
+        if ic_daily is None or ic_intraday is None or ic_intraday.empty:
+            st.error(f"Couldn't load price history for {ic_symbol}.")
+        else:
+            ic_sigma = iron_condor_backtest._realized_vol_series(ic_daily["Close"]).iloc[-1]
+            ic_spot = float(ic_intraday["Close"].iloc[-1])
+            ic_t = iron_condor_backtest._time_fraction_remaining(
+                iron_condor_backtest.ENTRY_TIME, iron_condor_backtest.EXIT_TIME)
+            if pd.isna(ic_sigma) or ic_sigma <= 0:
+                st.warning("Not enough history to estimate realized volatility yet.")
+            else:
+                ic_cfg = iron_condor_backtest.INSTRUMENT_CONFIG[ic_symbol]
+                ic_sc = iron_condor_backtest._find_strike_for_delta(
+                    ic_spot, ic_t, ic_sigma, iron_condor_backtest.SHORT_DELTA_TARGET, "call", ic_cfg["strike_step"])
+                ic_sp = iron_condor_backtest._find_strike_for_delta(
+                    ic_spot, ic_t, ic_sigma, iron_condor_backtest.SHORT_DELTA_TARGET, "put", ic_cfg["strike_step"])
+                if ic_sc is None or ic_sp is None:
+                    st.warning("Couldn't locate strikes at the target delta for the latest spot/volatility.")
+                else:
+                    ic_lc = ic_sc + ic_cfg["spread_width"]
+                    ic_lp = ic_sp - ic_cfg["spread_width"]
+                    ic_credit = iron_condor_backtest._condor_cost_to_close(
+                        ic_spot, ic_t, ic_sigma, ic_sc, ic_lc, ic_sp, ic_lp)
+                    ic_max_loss = ic_cfg["spread_width"] - ic_credit
+
+                    st.caption(f"Latest cached spot: {ic_spot:,.2f} · trailing realized vol: {ic_sigma*100:.1f}% "
+                               f"(annualized, {iron_condor_backtest.VOL_LOOKBACK}-day) — NOT live data, based on "
+                               f"whatever is currently cached.")
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Sell Call", ic_sc)
+                    m2.metric("Buy Call", ic_lc)
+                    m3.metric("Sell Put", ic_sp)
+                    m4.metric("Buy Put", ic_lp)
+                    m5, m6 = st.columns(2)
+                    m5.metric("Model credit (points)", f"{ic_credit:.2f}")
+                    m6.metric("Model max loss (points)", f"{ic_max_loss:.2f}")
+
 with tab_backtest:
     st.title("🧪 Backtest")
-    bt_strategy = st.radio("Strategy", ["Golden Cross", "CPR + EMA", "Swing Strategy", "Momentum Screener"],
-                            horizontal=True, key="bt_strategy")
+    bt_strategy = st.radio(
+        "Strategy", ["Golden Cross", "CPR + EMA", "Swing Strategy", "Momentum Screener", "Iron Condor"],
+        horizontal=True, key="bt_strategy")
     st.divider()
 
 if bt_strategy == "Golden Cross":
@@ -1560,6 +1699,193 @@ elif bt_strategy == "Momentum Screener":
             file_name=f"momentum_backtest_{mom_mode_key}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
         )
 
+elif bt_strategy == "Iron Condor":
+  with tab_backtest:
+    st.subheader("Intraday Iron Condor Backtest")
+    st.warning(
+        "**No real options-chain data exists for this app** — this prices a synthetic Iron Condor via "
+        "Black-Scholes, fed by the actual index history, using trailing realized volatility as an IV "
+        "stand-in. Also: Yahoo only retains ~60 days of 15-min history, so this can only cover the last "
+        "~60 trading days, not a multi-year window like the other backtests — and \"expiry weekday\" is "
+        "a parameter you set, not looked up from a real contract calendar (NSE has changed this by "
+        "circular before)."
+    )
+
+    ibt_variant = st.radio("Which variant", ["0DTE (expiry day)", "Non-Expiry Day (Range)"],
+                            horizontal=True, key="ibt_variant")
+
+    if ibt_variant == "0DTE (expiry day)":
+        with st.expander("Rules being backtested (Entry / Exit / Risk controls)", expanded=True):
+            st.markdown("""
+**Entry — around 09:45 AM, on the chosen weekly expiry day**
+- Sell a **Call** and a **Put**, each ≈15–20 delta (≈80–85% probability of expiring worthless)
+- Buy one further-OTM Call and one further-OTM Put, spread-width away — this caps max loss up front
+- Only enter if the credit collected is worth it relative to the spread width; skip thin days
+
+**Exit — whichever comes first**
+- **Stop-loss**: cost to close the position reaches ≈1.5–2× the credit collected → exit immediately
+- **Time-based**: forced flat at 3:15 PM every day — no exceptions, no overnight risk ever
+
+**Risk control — what actually bounds the drawdown**
+- Risk a fixed % of capital per trade (set below), sized off that trade's own defined max loss
+- One condor per expiry day — no re-entry same day after a stop-out
+            """)
+
+        ibt_col1, ibt_col2, ibt_col3 = st.columns(3)
+        ibt_symbol = ibt_col1.selectbox("Index", list(iron_condor_backtest.INSTRUMENT_CONFIG.keys()), key="ibt_symbol")
+        ibt_weekday = ibt_col2.selectbox("Weekly expiry weekday",
+                                          list(iron_condor_backtest.EXPIRY_WEEKDAY_MAP.keys()),
+                                          index=3, key="ibt_weekday")
+        ibt_risk_per_trade = ibt_col3.number_input(
+            "Portfolio sim: risk % of capital per trade", min_value=0.1, max_value=5.0, value=1.0, step=0.1,
+            key="ibt_risk_per_trade",
+        )
+        ibt_force_refresh = st.checkbox("Force-refresh price history (ignore cache)", key="ibt_force_refresh")
+
+        if st.button("▶️ Run Iron Condor Backtest", type="primary"):
+            ibt_trades = iron_condor_backtest.run_backtest(
+                ibt_symbol, expiry_weekday=ibt_weekday, start_date="2020-01-01", force_refresh=ibt_force_refresh,
+            )
+            st.session_state["ibt_trades"] = ibt_trades
+            st.session_state["ibt_ran_at"] = pd.Timestamp.now()
+
+        ibt_trades = st.session_state.get("ibt_trades")
+
+        if ibt_trades is None:
+            st.info("Click **Run Iron Condor Backtest** above.")
+        elif ibt_trades.empty:
+            st.warning(f"No {ibt_weekday} sessions with enough cached 15-min + daily history to simulate. "
+                       "Try a different weekday, or run other scans first to warm up the price cache.")
+        else:
+            st.caption(f"Last run: {st.session_state['ibt_ran_at']:%Y-%m-%d %H:%M}")
+
+            ibt_summary = swing_backtest.summarize(ibt_trades)
+            ibt_port = iron_condor_backtest.simulate_portfolio(ibt_trades, risk_per_trade_pct=ibt_risk_per_trade)
+
+            ibt_c1, ibt_c2, ibt_c3, ibt_c4, ibt_c5 = st.columns(5)
+            ibt_c1.metric("Trades", ibt_summary["closed_trades"])
+            ibt_c2.metric("Win rate", f"{ibt_summary['win_rate_pct']:.1f}%"
+                           if pd.notna(ibt_summary["win_rate_pct"]) else "—")
+            ibt_c3.metric("Avg return on risk", f"{ibt_summary['avg_return_pct']:.1f}%"
+                           if pd.notna(ibt_summary["avg_return_pct"]) else "—")
+            ibt_c4.metric("Portfolio return", f"{ibt_port['total_return_pct']:.2f}%",
+                           help=f"Started at 100, risking {ibt_risk_per_trade}% of capital per trade, "
+                                "compounding sequentially (trades never overlap by construction).")
+            ibt_c5.metric("Portfolio max drawdown", f"{ibt_port['max_drawdown_pct']:.2f}%"
+                           if pd.notna(ibt_port["max_drawdown_pct"]) else "—")
+            st.caption(f"Avg winner: {ibt_summary['avg_win_pct']:.1f}% of max loss · "
+                       f"Avg loser: {ibt_summary['avg_loss_pct']:.1f}% of max loss")
+
+            if not ibt_port["equity_curve"].empty:
+                ibt_fig = go.Figure()
+                ibt_fig.add_trace(go.Scatter(
+                    x=ibt_port["equity_curve"].index, y=ibt_port["equity_curve"].values,
+                    mode="lines+markers", name="Capital",
+                ))
+                ibt_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10),
+                                       yaxis_title="Capital (started at 100)", xaxis_title="Expiry date")
+                st.plotly_chart(ibt_fig, use_container_width=True)
+
+            st.subheader("Trades")
+            st.dataframe(ibt_trades, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download all trades (CSV)", ibt_trades.to_csv(index=False),
+                file_name=f"iron_condor_backtest_{ibt_symbol}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+            )
+
+    else:
+        st.warning(
+            "**This variant is regime-dependent, confirmed by backtesting it, not just theory**: it "
+            "profits when the index stays range-bound and loses when it trends hard. In testing, Nifty "
+            "50 (range-bound in the tested window) showed a 94% win rate; Bank Nifty (trending down hard "
+            "in the same window) showed only 34%, with repeated stop-losses on the put side. Check both "
+            "before trusting either number."
+        )
+        with st.expander("Rules being backtested (Entry / Exit / Risk controls)", expanded=True):
+            st.markdown("""
+**Entry — ~09:45 AM, on any day that is NOT the chosen expiry weekday, with ≥2 days left to expiry**
+- Short strikes = day's open ± the recent 10-day average daily range (range-based, not delta-based)
+- Same Iron Condor hedge structure (buy further-OTM Call/Put to cap max loss)
+- Entries with only 1 day left to expiry are skipped — backtesting found those specifically underperform
+  (credit shrinks a lot while full-session range risk doesn't)
+
+**Exit — whichever comes first**
+- **Time-based**: flat by ~1:15 PM — earlier than 0DTE, since the edge here (intraday vol crush) is
+  front-loaded to the first half of the session
+- **Stop-loss**: cost to close reaches ≈1.4× the credit collected
+
+**The edge being harvested is different from 0DTE**: with days still left, there's barely any theta
+decay in one session, so this targets intraday **implied volatility crush** (elevated at the open,
+compressing through the morning) instead — modeled from each 15-min time bucket's own historical
+volatility relative to the session average. With only ~60 days of history, that per-bucket estimate has
+a small sample and should be read as illustrative of the mechanism, not a precise curve.
+            """)
+
+        ibtr_col1, ibtr_col2, ibtr_col3 = st.columns(3)
+        ibtr_symbol = ibtr_col1.selectbox("Index", list(iron_condor_backtest.INSTRUMENT_CONFIG.keys()),
+                                           key="ibtr_symbol")
+        ibtr_weekday = ibtr_col2.selectbox("Weekly expiry weekday",
+                                            list(iron_condor_backtest.EXPIRY_WEEKDAY_MAP.keys()),
+                                            index=3, key="ibtr_weekday")
+        ibtr_risk_per_trade = ibtr_col3.number_input(
+            "Portfolio sim: risk % of capital per trade", min_value=0.1, max_value=5.0, value=1.0, step=0.1,
+            key="ibtr_risk_per_trade",
+        )
+        ibtr_force_refresh = st.checkbox("Force-refresh price history (ignore cache)", key="ibtr_force_refresh")
+
+        if st.button("▶️ Run Non-Expiry Range Condor Backtest", type="primary"):
+            ibtr_trades = iron_condor_range_backtest.run_backtest(
+                ibtr_symbol, expiry_weekday=ibtr_weekday, start_date="2020-01-01",
+                force_refresh=ibtr_force_refresh,
+            )
+            st.session_state["ibtr_trades"] = ibtr_trades
+            st.session_state["ibtr_ran_at"] = pd.Timestamp.now()
+
+        ibtr_trades = st.session_state.get("ibtr_trades")
+
+        if ibtr_trades is None:
+            st.info("Click **Run Non-Expiry Range Condor Backtest** above.")
+        elif ibtr_trades.empty:
+            st.warning(f"No non-{ibtr_weekday} sessions with enough cached 15-min + daily history to "
+                       "simulate. Try a different weekday, or run other scans first to warm the cache.")
+        else:
+            st.caption(f"Last run: {st.session_state['ibtr_ran_at']:%Y-%m-%d %H:%M}")
+
+            ibtr_summary = swing_backtest.summarize(ibtr_trades)
+            ibtr_port = iron_condor_range_backtest.simulate_portfolio(
+                ibtr_trades, risk_per_trade_pct=ibtr_risk_per_trade)
+
+            ibtr_c1, ibtr_c2, ibtr_c3, ibtr_c4, ibtr_c5 = st.columns(5)
+            ibtr_c1.metric("Trades", ibtr_summary["closed_trades"])
+            ibtr_c2.metric("Win rate", f"{ibtr_summary['win_rate_pct']:.1f}%"
+                           if pd.notna(ibtr_summary["win_rate_pct"]) else "—")
+            ibtr_c3.metric("Avg return on risk", f"{ibtr_summary['avg_return_pct']:.1f}%"
+                           if pd.notna(ibtr_summary["avg_return_pct"]) else "—")
+            ibtr_c4.metric("Portfolio return", f"{ibtr_port['total_return_pct']:.2f}%",
+                           help=f"Started at 100, risking {ibtr_risk_per_trade}% of capital per trade, "
+                                "compounding sequentially (trades never overlap by construction).")
+            ibtr_c5.metric("Portfolio max drawdown", f"{ibtr_port['max_drawdown_pct']:.2f}%"
+                           if pd.notna(ibtr_port["max_drawdown_pct"]) else "—")
+            st.caption(f"Avg winner: {ibtr_summary['avg_win_pct']:.1f}% of max loss · "
+                       f"Avg loser: {ibtr_summary['avg_loss_pct']:.1f}% of max loss")
+
+            if not ibtr_port["equity_curve"].empty:
+                ibtr_fig = go.Figure()
+                ibtr_fig.add_trace(go.Scatter(
+                    x=ibtr_port["equity_curve"].index, y=ibtr_port["equity_curve"].values,
+                    mode="lines+markers", name="Capital",
+                ))
+                ibtr_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10),
+                                       yaxis_title="Capital (started at 100)", xaxis_title="Entry date")
+                st.plotly_chart(ibtr_fig, use_container_width=True)
+
+            st.subheader("Trades")
+            st.dataframe(ibtr_trades, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download all trades (CSV)", ibtr_trades.to_csv(index=False),
+                file_name=f"iron_condor_range_backtest_{ibtr_symbol}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+            )
+
 with tab_calls:
     st.title("📞 Call Performance")
     st.caption(
@@ -1628,6 +1954,107 @@ with tab_calls:
                     "Change %": st.column_config.NumberColumn(format="%.2f%%"),
                 },
             )
+
+with tab_paper:
+    st.title("📝 Paper Trading")
+    st.caption(
+        f"Every strategy built in this app, running forward live from today with its own independent "
+        f"₹{paper_trading.STARTING_CAPITAL:,.0f} paper account — so their real, live performance can be "
+        f"compared apples-to-apples instead of guessing from backtests alone."
+    )
+    st.info(
+        f"**Position sizing** (applied uniformly to all 8): risk {paper_trading.RISK_PER_TRADE_PCT}% of "
+        f"that strategy's own current capital per trade, sized off that trade's own stop-loss distance — "
+        "same discipline validated in every backtest on this app. Each strategy keeps its **own** entry/"
+        "exit/stop rules exactly as already built and tested (nothing was redesigned here) — this only "
+        "adds the capital ledger and position sizing on top. "
+        "**Automation**: the 6 daily/weekly equity strategies are checked once per trading day, after "
+        "the close; the 2 Iron Condor strategies are checked every 15 minutes during market hours, since "
+        "they react to same-day entry/exit windows. Runs automatically via the same background job that "
+        "already sends your Telegram alerts (local launchd / GitHub Actions) — nothing here requires the "
+        "Streamlit app itself to be open."
+    )
+
+    ptc1, ptc2 = st.columns([3, 1])
+    with ptc2:
+        if st.button("▶️ Run all checks now"):
+            with st.spinner("Running every strategy's daily + intraday check..."):
+                for s in paper_trading.DAILY_BAR_STRATEGIES:
+                    try:
+                        paper_trading.run_daily_cycle(s)
+                    except Exception as e:
+                        st.warning(f"{paper_trading.STRATEGY_LABELS[s]}: {e}")
+                for s in paper_trading.INTRADAY_STRATEGIES:
+                    try:
+                        paper_trading.run_iron_condor_cycle(s)
+                    except Exception as e:
+                        st.warning(f"{paper_trading.STRATEGY_LABELS[s]}: {e}")
+            st.success("Done.")
+            st.rerun()
+
+    st.subheader("Comparative view")
+    comparison = paper_trading.comparison_table()
+    st.dataframe(
+        comparison, use_container_width=True, hide_index=True,
+        column_config={
+            "Capital": st.column_config.NumberColumn(format="₹%.2f"),
+            "Total Return %": st.column_config.NumberColumn(format="%.2f%%"),
+            "Win Rate %": st.column_config.NumberColumn(format="%.1f%%"),
+            "Current Drawdown %": st.column_config.NumberColumn(format="%.2f%%"),
+        },
+    )
+
+    all_trades = {s: paper_trading.load_trades(s) for s in paper_trading.STRATEGIES}
+    any_trades = any(not t.empty for t in all_trades.values())
+    if any_trades:
+        st.subheader("Capital over time (all strategies)")
+        pt_fig = go.Figure()
+        for s in paper_trading.STRATEGIES:
+            t = all_trades[s]
+            if t.empty:
+                continue
+            t = t.sort_values("exit_date")
+            pt_fig.add_trace(go.Scatter(
+                x=pd.to_datetime(t["exit_date"]), y=t["capital_after"],
+                mode="lines+markers", name=paper_trading.STRATEGY_LABELS[s],
+            ))
+        pt_fig.update_layout(height=400, margin=dict(l=10, r=10, t=30, b=10),
+                              yaxis_title="Capital (₹)", xaxis_title="Exit date")
+        st.plotly_chart(pt_fig, use_container_width=True)
+    else:
+        st.info("No closed trades yet on any strategy — the comparison chart will fill in as trades close. "
+                "This is expected on day one.")
+
+    st.subheader("Per-strategy detail")
+    pt_selected = st.selectbox("Strategy", paper_trading.STRATEGIES,
+                                format_func=lambda s: paper_trading.STRATEGY_LABELS[s], key="pt_selected")
+    pt_state = paper_trading.load_state(pt_selected)
+    pt_trades = all_trades[pt_selected]
+
+    if pt_selected in paper_trading.DAILY_BAR_STRATEGIES:
+        if pt_state["open_positions"]:
+            st.write("**Open positions**")
+            st.dataframe(pd.DataFrame(pt_state["open_positions"]), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No open positions right now.")
+    else:
+        pos = pt_state["intraday"].get("position")
+        if pos:
+            st.write("**Open position (today)**")
+            st.json(pos)
+        else:
+            st.caption("No open position right now.")
+
+    st.write("**Closed trades**")
+    if pt_trades.empty:
+        st.caption("No closed trades yet for this strategy.")
+    else:
+        st.dataframe(pt_trades.sort_values("exit_date", ascending=False), use_container_width=True,
+                     hide_index=True)
+        st.download_button(
+            "Download trades (CSV)", pt_trades.to_csv(index=False),
+            file_name=f"paper_trading_{pt_selected}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+        )
 
 with tab_watchlist:
     st.title("⭐ Watchlist")

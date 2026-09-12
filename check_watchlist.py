@@ -4,15 +4,20 @@ Streamlit process. Invoke with the venv's python, e.g.:
 
     venv/bin/python3 check_watchlist.py
 
-Runs two things, both gated to NSE-relevant hours (IST) so it's harmless to
-leave the launchd job loaded permanently -- see README.md "Watchlist Alerts"
-and "Universe Digest" for details:
+Runs several things, all gated to NSE-relevant hours (IST) so it's harmless
+to leave the launchd job loaded permanently -- see README.md "Watchlist
+Alerts" and "Universe Digest" for details:
   1. The per-symbol Watchlist check (watchlist.py) -- only during live
      trading hours (Mon-Fri 9:15-15:30).
   2. The full-universe scan digest (universe_digest.py) -- during trading
      hours for its 15-Minute/1-Hour combos, plus a short window after close
      (15:30-16:00) for its once-daily 1D/1W/1M combos. It self-gates its own
      cadence internally, so it's safe to call every cycle.
+  3. Paper trading (paper_trading.py) -- the two intraday Iron Condor
+     strategies are checked every cycle during trading hours (they need to
+     react to same-day entry/exit windows); the six daily/weekly equity
+     strategies are checked once, in the 15:30-16:00 post-close window,
+     since a day's own bar isn't meaningfully final before then.
 
 A file lock prevents two invocations from ever running concurrently -- the
 first-ever universe digest cycle has to cold-fetch ~500 stocks and can take
@@ -35,6 +40,7 @@ import watchlist
 import universe_digest
 import screener_alert
 import cpr_alert
+import paper_trading
 
 LOG_PATH = os.path.join(PROJECT_ROOT, "data", "watchlist_check.log")
 LOCK_PATH = os.path.join(PROJECT_ROOT, "data", ".check_watchlist.lock")
@@ -55,6 +61,16 @@ def _is_eligible_window(now_ist: datetime) -> bool:
     if now_ist.weekday() >= 5:
         return False
     return MARKET_OPEN <= now_ist.time() <= DAILY_DIGEST_END
+
+
+def _is_post_close_window(now_ist: datetime) -> bool:
+    """15:30-16:00 IST -- same window cpr_alert.py's daily check uses. Paper
+    trading's daily-bar strategies wait for this window rather than running
+    from market open, since a day's own daily bar isn't meaningfully final
+    (or even mostly formed) until after the close."""
+    if now_ist.weekday() >= 5:
+        return False
+    return MARKET_CLOSE <= now_ist.time() <= DAILY_DIGEST_END
 
 
 def _log(line: str) -> None:
@@ -110,6 +126,22 @@ def main():
             parts.append(f"cpr: hits={cpr_result['hits']} messages_sent={cpr_result.get('messages_sent', 0)}")
         else:
             parts.append(f"cpr: skipped ({cpr_result.get('reason', 'n/a')})")
+
+        if _is_trading_hours(now_ist):
+            for strat in paper_trading.INTRADAY_STRATEGIES:
+                try:
+                    r = paper_trading.run_iron_condor_cycle(strat)
+                    parts.append(f"paper[{strat}]: {r}")
+                except Exception as e:
+                    parts.append(f"paper[{strat}]: ERROR {e}")
+
+        if _is_post_close_window(now_ist):
+            for strat in paper_trading.DAILY_BAR_STRATEGIES:
+                try:
+                    r = paper_trading.run_daily_cycle(strat)
+                    parts.append(f"paper[{strat}]: {r}")
+                except Exception as e:
+                    parts.append(f"paper[{strat}]: ERROR {e}")
 
         _log(" | ".join(parts))
     finally:

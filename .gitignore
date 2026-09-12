@@ -17,3 +17,6 @@ data/active_scan_config.json
 data/fii_dii.csv
 data/call_log.csv
 data/cpr_state.json
+data/paper_trading/
+*.key
+*.key.pub

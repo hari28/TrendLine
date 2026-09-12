@@ -1,0 +1,23 @@
+# One alert cycle: per-symbol Watchlist + Universe Digest + CPR alert.
+# Triggered by trendline-alerts.timer; see check_watchlist.py for what it
+# does and how it self-gates to NSE hours (so off-hours runs no-op fast).
+# Installed by deploy/oci/setup.sh, which substitutes the __PLACEHOLDERS__.
+[Unit]
+Description=TrendLine alert cycle (watchlist / universe digest / CPR)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__APP_DIR__
+Environment=TZ=Asia/Kolkata
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-__APP_DIR__/.env
+ExecStart=__APP_DIR__/venv/bin/python check_watchlist.py
+# Keep the web app responsive while a scan is running on 2 vCPUs.
+Nice=10
+# The first-ever digest cycle cold-fetches ~500 symbols and can exceed the
+# 15-min interval (the timer simply won't re-fire while this is active).
+# Cap it so a wedged run can't block every later cycle forever.
+TimeoutStartSec=45min

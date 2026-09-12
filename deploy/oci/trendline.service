@@ -1,0 +1,33 @@
+# systemd unit for the TrendLine Streamlit web app.
+# Installed by deploy/oci/setup.sh, which substitutes the __PLACEHOLDERS__.
+[Unit]
+Description=TrendLine Streamlit app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__APP_DIR__
+# The app shows "scanned at" timestamps with naive local time -- pin the
+# process to IST so they read the same as they did on a laptop in India,
+# without changing the VM's system clock (other things on the box use UTC).
+Environment=TZ=Asia/Kolkata
+Environment=PYTHONUNBUFFERED=1
+# Telegram credentials etc. Optional (leading "-"): the app still starts
+# without it, alerts just log "Telegram not configured".
+EnvironmentFile=-__APP_DIR__/.env
+# headless: never block on Streamlit's first-run "enter your email" prompt.
+# fileWatcherType none: no inotify watching on a 1 GB VM -- restart to pick
+# up code changes (setup.sh does that).
+ExecStart=__APP_DIR__/venv/bin/streamlit run app.py \
+    --server.headless true \
+    --server.address 0.0.0.0 \
+    --server.port __PORT__ \
+    --server.fileWatcherType none \
+    --browser.gatherUsageStats false
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,15 +1,23 @@
 name: TrendLine Alerts
 
-# Runs check_watchlist.py on a schedule so the Telegram alert pipeline no
-# longer depends on a Mac being awake with launchd loaded. The script itself
-# (see check_watchlist.py) already gates on NSE trading hours/weekdays, so it
-# is safe to fire this on a wider window -- off-hours runs just no-op fast.
+# Originally ran check_watchlist.py on a schedule so the Telegram alert
+# pipeline didn't depend on a Mac being awake with launchd loaded.
+#
+# Schedule DISABLED as of 2026-09-12: the alert cycle now runs on a
+# persistent Oracle Cloud VM instead (deploy/oci/trendline-alerts.timer,
+# every 15 min, same check_watchlist.py). Running both here and there sent
+# duplicate Telegram alerts and split Paper Trading's capital ledger across
+# two un-synced copies of state (this workflow's ephemeral actions/cache vs.
+# the VM's persistent disk). The VM is always-on, so it's the better single
+# source of truth -- this workflow is kept only for on-demand manual runs
+# (workflow_dispatch) if you ever want to trigger a cycle without touching
+# the VM. Re-enable the schedule below if the VM is ever retired.
 #
 # Cron times are UTC. IST = UTC+5:30, so 9:15-16:00 IST -> ~03:45-10:30 UTC.
 # Widened slightly on both ends to be safe against schedule drift.
 on:
-  schedule:
-    - cron: "*/15 3-10 * * 1-5"
+  # schedule:
+  #   - cron: "*/15 3-10 * * 1-5"
   workflow_dispatch: {}  # lets you trigger a run manually from the Actions tab
 
 concurrency:
@@ -36,6 +44,7 @@ jobs:
             data/active_scan_config.json
             data/cpr_state.json
             data/call_log.csv
+            data/paper_trading
           key: trendline-state-${{ github.run_id }}
           restore-keys: |
             trendline-state-
@@ -60,4 +69,5 @@ jobs:
             data/active_scan_config.json
             data/cpr_state.json
             data/call_log.csv
+            data/paper_trading
           key: trendline-state-${{ github.run_id }}
