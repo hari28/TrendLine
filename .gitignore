@@ -15,3 +15,5 @@ data/universe_digest_state.json
 data/.check_watchlist.lock
 data/active_scan_config.json
 data/fii_dii.csv
+data/call_log.csv
+data/cpr_state.json

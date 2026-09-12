@@ -28,6 +28,7 @@ per trade) to -- it does not decide trades for you.
 import time
 from datetime import datetime
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from constituents import get_all_symbols, get_constituents, INDEX_UNIVERSE_LABEL
@@ -43,6 +44,9 @@ import cpr
 import structure
 import fo_universe
 import telegram_bot
+import backtest
+import cpr_ema_backtest
+import call_log
 
 st.set_page_config(page_title="TrendLine", layout="wide")
 
@@ -270,8 +274,10 @@ with st.sidebar:
     else:
         st.caption("Pick a symbol above first.")
 
-tab_screener, tab_stock_chart, tab_volume_profile, tab_cpr, tab_structure, tab_watchlist = st.tabs(
-    ["Screener", "🔍 Stock Chart", "Volume Profile", "🎯 Narrow CPR", "📐 Market Structure", "⭐ Watchlist"]
+(tab_screener, tab_stock_chart, tab_volume_profile, tab_cpr, tab_structure, tab_backtest, tab_calls,
+ tab_watchlist) = st.tabs(
+    ["Screener", "🔍 Stock Chart", "Volume Profile", "🎯 Narrow CPR", "📐 Market Structure", "🧪 Backtest",
+     "📞 Call Performance", "⭐ Watchlist"]
 )
 
 with tab_screener:
@@ -413,7 +419,9 @@ with tab_screener:
                 out[f"% above {ma_col}"] = out[f"% above {ma_col}"].round(2)
                 return out.sort_values(by=f"% above {ma_col}")
 
-            st.subheader(f"🟢 Long — just above {ma_col} on {st.session_state['scanned_tf']} ({len(in_band)})")
+            st.subheader(f"🟢 Long — fresh cross above {ma_col} on {st.session_state['scanned_tf']} ({len(in_band)})")
+            st.caption("Only stocks whose previous bar closed at/below the MA and whose latest bar closed "
+                       "above it -- a genuine fresh cross, not just \"currently sitting above.\"")
             if in_band.empty:
                 st.write("No stocks currently meet this condition with these settings.")
             else:
@@ -435,7 +443,8 @@ with tab_screener:
                     file_name=f"below_band_{ma_col}_{scanned_tf_key}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
                 )
 
-            with st.expander(f"Above band — further extended above {ma_col} ({len(above)})"):
+            with st.expander(f"Above band — extended above {ma_col}, or in-range with no fresh cross today "
+                              f"({len(above)})"):
                 st.dataframe(_fmt(above) if not above.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
 
             with st.expander(f"Insufficient history for a 200-bar {scanned_ma} on this timeframe ({len(no_hist)})"):
@@ -464,8 +473,10 @@ with tab_screener:
                 out[f"% below {ma_col}"] = out[f"% below {ma_col}"].round(2)
                 return out.sort_values(by=f"% below {ma_col}")
 
-            st.subheader(f"🔴 Short — just broke down below {ma_col} on {st.session_state['scanned_tf']} "
+            st.subheader(f"🔴 Short — fresh breakdown below {ma_col} on {st.session_state['scanned_tf']} "
                          f"({len(in_band)})")
+            st.caption("Only stocks whose previous bar closed at/above the MA and whose latest bar closed "
+                       "below it -- a genuine fresh breakdown, not just \"currently sitting under it.\"")
             if in_band.empty:
                 st.write("No stocks currently meet this condition with these settings.")
             else:
@@ -476,9 +487,10 @@ with tab_screener:
                     file_name=f"below_200ma_{ma_col}_{scanned_tf_key}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
                 )
 
-            with st.expander(f"Extended below — further under {ma_col}, already fell a lot ({len(extended)})"):
-                st.write("Already well below the MA — a short entry here is chasing a move that's "
-                         "further along, not a fresh breakdown.")
+            with st.expander(f"Extended below — further under {ma_col}, or in-range with no fresh break "
+                              f"today ({len(extended)})"):
+                st.write("Already well below the MA (or sitting in-range without a fresh break today) — a "
+                         "short entry here is chasing a move that's further along, not a fresh breakdown.")
                 st.dataframe(_fmt(extended) if not extended.empty else pd.DataFrame(),
                              use_container_width=True, hide_index=True)
 
@@ -1130,6 +1142,253 @@ with tab_structure:
         ],
         records=structure_records,
     )
+
+with tab_backtest:
+    st.title("🧪 Backtest")
+    bt_strategy = st.radio("Strategy", ["Golden Cross", "CPR + EMA"], horizontal=True, key="bt_strategy")
+    st.divider()
+
+if bt_strategy == "Golden Cross":
+  with tab_backtest:
+    st.subheader("Golden Cross Backtest")
+    st.caption(
+        "Nifty 100, 50/200 EMA cross on the timeframe below. Entry once price is that much above "
+        "the cross bar's close; exit at target or stop-loss, whichever comes first. One trade per "
+        "symbol at a time. Uses the same cached price history as the Screener tab."
+    )
+
+    bt_tf_options = {"1 Day": "1D", "1 Week": "1W"}
+    bt_col1, bt_col2, bt_col3, bt_col4 = st.columns(4)
+    bt_tf_label = bt_col1.radio("Timeframe", list(bt_tf_options.keys()), index=1, horizontal=False,
+                                 key="bt_timeframe")
+    bt_entry_trigger_pct = bt_col2.number_input("Entry trigger (% above cross)", value=5.0, step=0.5,
+                                                 key="bt_entry_trigger") / 100
+    bt_target_pct = bt_col3.number_input("Target (%)", value=10.0, step=1.0, key="bt_target") / 100
+    bt_stop_pct = bt_col4.number_input("Stop-loss (%)", value=5.0, step=0.5, key="bt_stop") / 100
+
+    bt_force_refresh = st.checkbox("Force-refresh price history (ignore cache)", key="bt_force_refresh")
+
+    if st.button("▶️ Run Golden Cross Backtest (Nifty 100)", type="primary"):
+        bt_progress = st.progress(0.0)
+        bt_status = st.empty()
+        bt_start = time.time()
+
+        def _bt_cb(i, total, symbol):
+            bt_progress.progress((i + 1) / total)
+            bt_status.text(f"[{i+1}/{total}] {symbol}")
+
+        bt_trades = backtest.run_backtest(
+            ["Nifty 100 (Large Cap)"], timeframe=bt_tf_options[bt_tf_label],
+            entry_trigger_pct=bt_entry_trigger_pct, target_pct=bt_target_pct, stop_pct=bt_stop_pct,
+            progress_cb=_bt_cb, force_refresh=bt_force_refresh,
+        )
+        bt_elapsed = time.time() - bt_start
+        bt_status.text(f"Done in {bt_elapsed:.0f}s — {len(bt_trades)} trade(s) generated.")
+
+        st.session_state["bt_trades"] = bt_trades
+        st.session_state["bt_ran_at"] = pd.Timestamp.now()
+
+    bt_trades = st.session_state.get("bt_trades")
+
+    if bt_trades is None:
+        st.info("Click **Run Golden Cross Backtest** above. First run is slow (full history fetch "
+                 "per stock); later runs reuse the local cache and are fast.")
+    elif bt_trades.empty:
+        st.warning("No Golden Cross signals produced a qualifying trade (entry never triggered, or "
+                   "not enough weekly history) for this universe.")
+    else:
+        st.caption(f"Last run: {st.session_state['bt_ran_at']:%Y-%m-%d %H:%M}")
+
+        bt_summary = backtest.summarize(bt_trades)
+        bt_c1, bt_c2, bt_c3, bt_c4 = st.columns(4)
+        bt_c1.metric("Closed trades", bt_summary["closed_trades"],
+                     help=f"{bt_summary['open_trades']} still open (never hit target/stop) as of latest data.")
+        bt_c2.metric("Win rate", f"{bt_summary['win_rate_pct']:.1f}%" if pd.notna(bt_summary["win_rate_pct"]) else "—")
+        bt_c3.metric("Avg return / trade", f"{bt_summary['avg_return_pct']:.2f}%"
+                     if pd.notna(bt_summary["avg_return_pct"]) else "—")
+        bt_c4.metric("Max drawdown", f"{bt_summary['max_drawdown_pct']:.2f}%"
+                     if pd.notna(bt_summary["max_drawdown_pct"]) else "—")
+        st.caption(
+            f"Avg winner: {bt_summary['avg_win_pct']:.2f}% · Avg loser: {bt_summary['avg_loss_pct']:.2f}% "
+            "· Drawdown is on an equity curve that compounds each closed trade in entry-date order "
+            "(a simplification — in reality multiple symbols can be in a trade at once)."
+        )
+
+        bt_closed = bt_trades[bt_trades["ExitReason"] != "Open (end of data)"]
+        if not bt_closed.empty:
+            bt_equity = backtest.equity_curve_from_trades(bt_closed)
+            bt_fig = go.Figure()
+            bt_fig.add_trace(go.Scatter(
+                x=bt_closed.sort_values("EntryDate")["EntryDate"], y=bt_equity,
+                mode="lines", name="Equity (x initial capital)",
+            ))
+            bt_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10),
+                                  yaxis_title="Equity multiple", xaxis_title="Entry date")
+            st.plotly_chart(bt_fig, use_container_width=True)
+
+        st.subheader("Trades")
+        st.dataframe(bt_trades, use_container_width=True, hide_index=True)
+
+elif bt_strategy == "CPR + EMA":
+  with tab_backtest:
+    st.subheader("CPR + EMA Backtest")
+    st.warning(
+        "**Scoping note:** this was requested on a 15-min timeframe, but that isn't reachable "
+        "through the Kite bridge available here — Kite's 15-min history caps each request at "
+        "~200 days (so one symbol's full history needs ~13 chunked calls), and tracking every "
+        "trade's SL/1R/2R/trailing exit at 15-min precision for its whole holding period would "
+        "need thousands more. All of that data has to pass through this chat, which isn't "
+        "practical at that volume. **This runs the same rules on daily candles instead** — CPR, "
+        "20/50/200 EMA trend filter, breakout entry/SL, 1R/2R partial booking, 20 EMA trailing "
+        "exit — which is a faithful read of the strategy (CPR itself is a daily-only indicator, "
+        "and the trailing-exit rule was already specified as a *daily* candle close)."
+    )
+    st.caption(
+        "LONG: close above CPR Top (TC) with price above 200 EMA. SHORT: close below CPR Bottom "
+        "(BC) with price below 200 EMA. SL = CPR Bottom/Top of the breakout day (never moved). "
+        "Exits: 25% at 1R, 30% at 2R, remaining 45% trailed — exit on a daily close back through "
+        "the 20 EMA. One trade per symbol at a time. No volume/rejection-candle filter (per your "
+        "'objective breakout only' choice)."
+    )
+
+    CPR_BT_UNIVERSE = [
+        ("RELIANCE", "Nifty 100"), ("HDFCBANK", "Nifty 100"), ("ICICIBANK", "Nifty 100"),
+        ("INFY", "Nifty 100"), ("TCS", "Nifty 100"), ("SBIN", "Nifty 100"), ("TATASTEEL", "Nifty 100"),
+        ("LT", "Nifty 100"), ("AXISBANK", "Nifty 100"), ("MARUTI", "Nifty 100"),
+    ]
+    st.caption(f"Universe: {', '.join(s for s, _ in CPR_BT_UNIVERSE)} (10 liquid large caps).")
+
+    cbt_col1, cbt_col2 = st.columns(2)
+    cbt_start_date = cbt_col1.date_input("Start date", value=pd.Timestamp("2020-01-01"), key="cbt_start_date")
+    cbt_force_refresh = cbt_col2.checkbox("Force-refresh price history (ignore cache)", key="cbt_force_refresh")
+
+    if st.button("▶️ Run CPR + EMA Backtest", type="primary"):
+        cbt_progress = st.progress(0.0)
+        cbt_status = st.empty()
+        cbt_start = time.time()
+
+        def _cbt_cb(i, total, symbol):
+            cbt_progress.progress((i + 1) / total)
+            cbt_status.text(f"[{i+1}/{total}] {symbol}")
+
+        cbt_trades = cpr_ema_backtest.run_backtest(
+            CPR_BT_UNIVERSE, start_date=str(cbt_start_date), progress_cb=_cbt_cb,
+            force_refresh=cbt_force_refresh,
+        )
+        cbt_elapsed = time.time() - cbt_start
+        cbt_status.text(f"Done in {cbt_elapsed:.0f}s — {len(cbt_trades)} trade(s) generated.")
+
+        st.session_state["cbt_trades"] = cbt_trades
+        st.session_state["cbt_ran_at"] = pd.Timestamp.now()
+
+    cbt_trades = st.session_state.get("cbt_trades")
+
+    if cbt_trades is None:
+        st.info("Click **Run CPR + EMA Backtest** above. First run is slow (full history fetch "
+                 "per stock); later runs reuse the local cache and are fast.")
+    elif cbt_trades.empty:
+        st.warning("No qualifying trades for this universe/date range.")
+    else:
+        st.caption(f"Last run: {st.session_state['cbt_ran_at']:%Y-%m-%d %H:%M}")
+
+        cbt_summary = cpr_ema_backtest.summarize(cbt_trades)
+        cbt_c1, cbt_c2, cbt_c3, cbt_c4 = st.columns(4)
+        cbt_c1.metric("Total trades", cbt_summary["total_trades"])
+        cbt_c2.metric("Win rate", f"{cbt_summary['win_rate_pct']:.1f}%"
+                      if pd.notna(cbt_summary["win_rate_pct"]) else "—")
+        cbt_c3.metric("Avg return / trade", f"{cbt_summary['avg_return_pct']:.2f}%"
+                      if pd.notna(cbt_summary["avg_return_pct"]) else "—")
+        cbt_c4.metric("Max drawdown", f"{cbt_summary['max_drawdown_pct']:.2f}%"
+                      if pd.notna(cbt_summary["max_drawdown_pct"]) else "—")
+        st.caption(
+            f"Avg winner: {cbt_summary['avg_win_pct']:.2f}% · Avg loser: {cbt_summary['avg_loss_pct']:.2f}% "
+            "· Long/Short split: "
+            f"{(cbt_trades['Direction'] == 'Long').sum()} / {(cbt_trades['Direction'] == 'Short').sum()} "
+            "· Drawdown is on an equity curve that compounds each trade in entry-date order "
+            "(a simplification — in reality multiple symbols can be in a trade at once)."
+        )
+
+        cbt_equity = (1 + cbt_trades.sort_values("EntryDate")["ReturnPct"] / 100).cumprod()
+        cbt_fig = go.Figure()
+        cbt_fig.add_trace(go.Scatter(
+            x=cbt_trades.sort_values("EntryDate")["EntryDate"], y=cbt_equity,
+            mode="lines", name="Equity (x initial capital)",
+        ))
+        cbt_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10),
+                               yaxis_title="Equity multiple", xaxis_title="Entry date")
+        st.plotly_chart(cbt_fig, use_container_width=True)
+
+        st.subheader("Trades")
+        st.dataframe(cbt_trades, use_container_width=True, hide_index=True)
+
+with tab_calls:
+    st.title("📞 Call Performance")
+    st.caption(
+        "Every Above 200 EMA / Golden Cross call TrendLine has sent to Telegram, logged the moment it "
+        "first qualified and marked to market against the latest daily close since. Read-only — this "
+        "tab never sends alerts, it just tracks what already went out."
+    )
+
+    calls_df = call_log.load_calls()
+    if calls_df.empty:
+        st.info(
+            "No calls logged yet. They're recorded automatically the next time a stock newly "
+            "qualifies for Above 200 EMA or Golden Cross in the 15-minute background alert cycle "
+            "(local launchd or GitHub Actions) — see README for how that job runs."
+        )
+    else:
+        call_filter_col1, call_filter_col2 = st.columns([2, 1])
+        with call_filter_col1:
+            call_signal_filter = st.multiselect(
+                "Signal type", ["Above 200 EMA", "Golden Cross"],
+                default=["Above 200 EMA", "Golden Cross"], key="call_signal_filter",
+            )
+        with call_filter_col2:
+            call_date_filter = st.date_input(
+                "Call date", value=None, key="call_date_filter", format="DD-MM-YYYY",
+                help="Pick a date to see only calls generated that day. Leave blank for all dates.",
+            )
+
+        calls_filtered = calls_df[calls_df["signal_type"].isin(call_signal_filter)] if call_signal_filter \
+            else calls_df.iloc[0:0]
+        if call_date_filter:
+            calls_filtered = calls_filtered[calls_filtered["date"].dt.date == call_date_filter]
+
+        if calls_filtered.empty:
+            st.warning("No calls match these filters.")
+        else:
+            with st.spinner("Marking calls to market..."):
+                calls_perf = call_log.with_performance(calls_filtered)
+
+            total_calls = len(calls_perf)
+            winners = int((calls_perf["change_pct"] > 0).sum())
+            win_rate = winners / total_calls * 100.0
+            avg_change = calls_perf["change_pct"].mean()
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Calls", total_calls)
+            m2.metric("Win rate", f"{win_rate:.1f}%", help="Share of calls currently above their call price")
+            m3.metric("Avg return", f"{avg_change:+.2f}%")
+            m4.metric("Best call", f"{calls_perf['change_pct'].max():+.2f}%")
+
+            calls_show = calls_perf.rename(columns={
+                "date": "Date", "time": "Time", "symbol": "Symbol", "segment": "Segment",
+                "signal_type": "Signal", "timeframe": "Timeframe", "close_at_call": "Close @ Call",
+                "current_close": "Close Now", "change_pct": "Change %", "days_since": "Days Since",
+            })
+            calls_show = calls_show[["Date", "Time", "Symbol", "Signal", "Timeframe", "Close @ Call",
+                                      "Close Now", "Change %", "Days Since"]].sort_values(
+                ["Date", "Time"], ascending=False)
+            calls_show["Date"] = calls_show["Date"].dt.strftime("%d-%b-%Y")
+
+            st.dataframe(
+                calls_show, use_container_width=True, hide_index=True,
+                column_config={
+                    "Close @ Call": st.column_config.NumberColumn(format="%.2f"),
+                    "Close Now": st.column_config.NumberColumn(format="%.2f"),
+                    "Change %": st.column_config.NumberColumn(format="%.2f%%"),
+                },
+            )
 
 with tab_watchlist:
     st.title("⭐ Watchlist")

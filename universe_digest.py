@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+import call_log
 from constituents import get_all_symbols
 from screener import (scan_universe, scan_universe_cross, scan_universe_volume, scan_universe_pattern,
                        apply_band, apply_band_below)
@@ -98,8 +99,11 @@ def _save_json(path: str, data) -> None:
 
 
 def _qualifying_symbols(mode: str, timeframe: str, symbols_df: pd.DataFrame) -> dict:
-    """Returns {key: detail_line} for symbols currently qualifying under `mode`
-    on `timeframe`. Never raises -- an empty dict on any scan failure."""
+    """Returns {key: entry} for symbols currently qualifying under `mode` on
+    `timeframe`. Every entry carries at least {"detail", "close", "segment"};
+    golden_cross entries also carry "cross_type" (Golden Cross vs Death
+    Cross), used by _check_combo to decide what gets logged to call_log.
+    Never raises -- an empty dict on any scan failure."""
     try:
         if mode == "above_ma":
             results = scan_universe(symbols_df, timeframe, MA_TYPE, force_refresh=False)
@@ -108,7 +112,9 @@ def _qualifying_symbols(mode: str, timeframe: str, symbols_df: pd.DataFrame) -> 
             results = results[results["Volume"] >= MIN_VOLUME]
             results = apply_band(results, *ABOVE_MA_BAND)
             hits = results[results["Status"] == "In band"]
-            return {r.Symbol: f"{r.Symbol}: In band ({r.PctAbove:.2f}% above {MA_TYPE}200)"
+            return {r.Symbol: {"detail": f"{r.Symbol}: In band ({r.PctAbove:.2f}% above {MA_TYPE}200) "
+                                          f"| LTP {r.Close:.2f}",
+                                "close": r.Close, "segment": r.Segment}
                     for r in hits.itertuples()}
 
         if mode == "below_ma":
@@ -118,7 +124,9 @@ def _qualifying_symbols(mode: str, timeframe: str, symbols_df: pd.DataFrame) -> 
             results = results[results["Volume"] >= MIN_VOLUME]
             results = apply_band_below(results, *BELOW_MA_BAND)
             hits = results[results["Status"] == "In band"]
-            return {r.Symbol: f"{r.Symbol}: In band ({-r.PctAbove:.2f}% below {MA_TYPE}200)"
+            return {r.Symbol: {"detail": f"{r.Symbol}: In band ({-r.PctAbove:.2f}% below {MA_TYPE}200) "
+                                          f"| LTP {r.Close:.2f}",
+                                "close": r.Close, "segment": r.Segment}
                     for r in hits.itertuples()}
 
         if mode == "golden_cross":
@@ -127,7 +135,9 @@ def _qualifying_symbols(mode: str, timeframe: str, symbols_df: pd.DataFrame) -> 
                 return {}
             results = results[results["Volume"] >= MIN_VOLUME]
             hits = results[results["CrossType"].isin(["Golden Cross", "Death Cross"])]
-            return {r.Symbol: f"{r.Symbol}: {r.CrossType}" for r in hits.itertuples()}
+            return {r.Symbol: {"detail": f"{r.Symbol}: {r.CrossType} | LTP {r.Close:.2f}", "close": r.Close,
+                                "segment": r.Segment, "cross_type": r.CrossType}
+                    for r in hits.itertuples()}
 
         if mode == "unusual_volume":
             results = scan_universe_volume(symbols_df, timeframe, VOLUME_AVG_PERIOD, VOLUME_SPIKE_MULTIPLE,
@@ -136,7 +146,9 @@ def _qualifying_symbols(mode: str, timeframe: str, symbols_df: pd.DataFrame) -> 
                 return {}
             results = results[results["Volume"] >= MIN_VOLUME]
             hits = results[results["Activity"].isin(["Unusual Buying", "Unusual Selling", "Volume Spike (Flat)"])]
-            return {r.Symbol: f"{r.Symbol}: {r.Activity}" for r in hits.itertuples()}
+            return {r.Symbol: {"detail": f"{r.Symbol}: {r.Activity} | LTP {r.Close:.2f}",
+                                "close": r.Close, "segment": r.Segment}
+                    for r in hits.itertuples()}
 
         if mode == "chart_pattern":
             results = scan_universe_pattern(symbols_df, timeframe, PATTERN_TYPES, PATTERN_LOOKBACK,
@@ -144,7 +156,9 @@ def _qualifying_symbols(mode: str, timeframe: str, symbols_df: pd.DataFrame) -> 
             if results.empty:
                 return {}
             results = results[results["Volume"] >= MIN_VOLUME]
-            return {f"{r.Symbol}:{r.Pattern}:{r.Direction}": f"{r.Symbol}: {r.Pattern} ({r.Direction})"
+            return {f"{r.Symbol}:{r.Pattern}:{r.Direction}": {
+                        "detail": f"{r.Symbol}: {r.Pattern} ({r.Direction}) | LTP {r.Close:.2f}",
+                        "close": r.Close, "segment": r.Segment}
                     for r in results.itertuples()}
 
     except Exception as e:
@@ -153,7 +167,27 @@ def _qualifying_symbols(mode: str, timeframe: str, symbols_df: pd.DataFrame) -> 
     return {}
 
 
-def _check_combo(mode: str, timeframe: str, symbols_df: pd.DataFrame, state: dict) -> list:
+def _log_new_calls(now_ist: datetime, mode: str, timeframe: str, current: dict, new_keys: set) -> None:
+    """Writes newly-qualifying above_ma / golden_cross hits to call_log.py --
+    the same moment a Telegram alert for them would fire. Skips Death Cross
+    (golden_cross covers both directions, but only the bullish cross counts
+    as a "call" per the user's request). Never raises -- a logging hiccup
+    should never break the alert cycle."""
+    if mode not in call_log.LOGGED_MODES:
+        return
+    for k in sorted(new_keys):
+        entry = current[k]
+        if mode == "golden_cross" and entry.get("cross_type") != "Golden Cross":
+            continue
+        try:
+            call_log.log_call(now_ist, symbol=k, segment=entry.get("segment", ""),
+                               signal_type=call_log.SIGNAL_LABELS[mode], timeframe=timeframe,
+                               close=entry["close"])
+        except Exception as e:
+            logger.error("Failed to log call for %s (%s/%s): %s", k, mode, timeframe, e)
+
+
+def _check_combo(now_ist: datetime, mode: str, timeframe: str, symbols_df: pd.DataFrame, state: dict) -> list:
     """Diffs current qualifying symbols against stored state; returns detail
     lines for NEWLY qualifying ones. First-ever check for a combo never
     alerts -- it just records the baseline (same philosophy as watchlist.py)."""
@@ -166,7 +200,10 @@ def _check_combo(mode: str, timeframe: str, symbols_df: pd.DataFrame, state: dic
     new_keys = set() if is_first_run else (current_keys - prev_keys)
     state["matches"][combo_key] = sorted(current_keys)
 
-    return [(mode, timeframe, current[k]) for k in sorted(new_keys)]
+    if not is_first_run:
+        _log_new_calls(now_ist, mode, timeframe, current, new_keys)
+
+    return [(mode, timeframe, current[k]["detail"]) for k in sorted(new_keys)]
 
 
 def _group_hits(hits: list) -> dict:
@@ -228,12 +265,12 @@ def run_cycle(now_ist: datetime, send_alerts: bool = True) -> dict:
     all_hits = []
     for mode in SCAN_MODES:
         if run_15min:
-            all_hits.extend(_check_combo(mode, "15MIN", symbols_df, state))
+            all_hits.extend(_check_combo(now_ist, mode, "15MIN", symbols_df, state))
         if run_hourly:
-            all_hits.extend(_check_combo(mode, "1H", symbols_df, state))
+            all_hits.extend(_check_combo(now_ist, mode, "1H", symbols_df, state))
         if run_daily:
             for tf in ("1D", "1W", "1M"):
-                all_hits.extend(_check_combo(mode, tf, symbols_df, state))
+                all_hits.extend(_check_combo(now_ist, mode, tf, symbols_df, state))
 
     if run_hourly:
         state["cadence"]["last_hourly_run"] = hour_key

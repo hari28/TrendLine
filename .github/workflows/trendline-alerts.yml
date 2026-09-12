@@ -35,6 +35,7 @@ jobs:
             data/universe_digest_state.json
             data/active_scan_config.json
             data/cpr_state.json
+            data/call_log.csv
           key: trendline-state-${{ github.run_id }}
           restore-keys: |
             trendline-state-
@@ -58,4 +59,5 @@ jobs:
             data/universe_digest_state.json
             data/active_scan_config.json
             data/cpr_state.json
+            data/call_log.csv
           key: trendline-state-${{ github.run_id }}

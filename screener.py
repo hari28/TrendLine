@@ -43,10 +43,21 @@ def scan_symbol(symbol: str, segment: str, timeframe: str, ma_type: str,
 
     close = frame["Close"]
     has_enough_history = len(close) >= PERIOD
-    ma_value = _ma(close, ma_type, PERIOD).iloc[-1]
+    ma_series = _ma(close, ma_type, PERIOD)
+    ma_value = ma_series.iloc[-1]
     last_close = close.iloc[-1]
 
     pct_above = float("nan") if pd.isna(ma_value) else (last_close - ma_value) / ma_value * 100.0
+
+    # "Fresh cross" = the previous bar closed on the other side of the MA and this
+    # bar closed on this side -- not just "currently above/below by some %", which
+    # stays true for as long as the stock lingers there. False (not NaN) whenever
+    # either bar's MA/close isn't available, so it never silently counts as a cross.
+    prev_close = close.iloc[-2] if len(close) > 1 else float("nan")
+    prev_ma_value = ma_series.iloc[-2] if len(ma_series) > 1 else float("nan")
+    have_prev = not pd.isna(prev_close) and not pd.isna(prev_ma_value) and not pd.isna(ma_value)
+    crossed_above = bool(have_prev and prev_close <= prev_ma_value and last_close > ma_value)
+    crossed_below = bool(have_prev and prev_close >= prev_ma_value and last_close < ma_value)
 
     return {
         "Symbol": symbol,
@@ -58,6 +69,8 @@ def scan_symbol(symbol: str, segment: str, timeframe: str, ma_type: str,
         "PctAbove": pct_above,
         "HasEnoughHistory": has_enough_history,
         "BarsAvailable": len(close),
+        "CrossedAbove": crossed_above,
+        "CrossedBelow": crossed_below,
     }
 
 
@@ -76,7 +89,11 @@ def scan_universe(symbols: pd.DataFrame, timeframe: str, ma_type: str, progress_
 
 
 def apply_band(df: pd.DataFrame, band_low: float, band_high: float) -> pd.DataFrame:
-    """Split rows into In Band / Above Band / Below Band / Insufficient history."""
+    """Split rows into In Band / Above Band / Below Band / Insufficient history.
+    "In band" requires BOTH being within the %-band AND a fresh cross (previous
+    bar closed at/below the MA, this bar closed above it) -- a stock that's simply
+    been sitting inside the band for a while, with no crossover today, falls
+    through to "Above band" instead so it never fires a fresh alert."""
     df = df.copy()
 
     def _status(r):
@@ -84,7 +101,7 @@ def apply_band(df: pd.DataFrame, band_low: float, band_high: float) -> pd.DataFr
             return "Insufficient history"
         if r["PctAbove"] < band_low:
             return "Below band"
-        if r["PctAbove"] <= band_high:
+        if r["PctAbove"] <= band_high and r.get("CrossedAbove", False):
             return "In band"
         return "Above band"
 
@@ -95,7 +112,10 @@ def apply_band(df: pd.DataFrame, band_low: float, band_high: float) -> pd.DataFr
 def apply_band_below(df: pd.DataFrame, band_low: float, band_high: float) -> pd.DataFrame:
     """Mirror of apply_band for short setups: band_low/band_high are read as % BELOW
     the 200 MA instead of % above -- e.g. (0, 3) means "just broke down, 0-3% under the
-    MA", the short-side equivalent of apply_band's "just crossed above" long entry zone."""
+    MA", the short-side equivalent of apply_band's "just crossed above" long entry zone.
+    Same fresh-cross requirement as apply_band: "In band" needs the previous bar to
+    have closed at/above the MA and this bar to have closed below it, not just
+    "currently sitting a little under it"."""
     df = df.copy()
 
     def _status(r):
@@ -104,7 +124,7 @@ def apply_band_below(df: pd.DataFrame, band_low: float, band_high: float) -> pd.
         pct_below = -r["PctAbove"]
         if pct_below < band_low:
             return "Not below MA"
-        if pct_below <= band_high:
+        if pct_below <= band_high and r.get("CrossedBelow", False):
             return "In band"
         return "Extended below"
 
