@@ -12,6 +12,17 @@ def ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False, min_periods=period).mean()
 
 
+def atr(frame: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Average True Range, Wilder-smoothed (an EMA with alpha=1/period, the
+    classic ATR convention) -- a volatility-adjusted distance, used to size
+    stop-losses off each stock's own recent range instead of a flat %."""
+    high, low, prev_close = frame["High"], frame["Low"], frame["Close"].shift(1)
+    true_range = pd.concat([
+        high - low, (high - prev_close).abs(), (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return true_range.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+
 def resample_ohlc(daily: pd.DataFrame, rule: str) -> pd.DataFrame:
     """Resample a daily OHLCV DataFrame (DatetimeIndex) to weekly ('W-FRI') or monthly ('ME')."""
     return daily.resample(rule).agg(_AGG).dropna(subset=["Close"])

@@ -3,8 +3,15 @@
 Reads credentials from environment variables, loaded via python-dotenv from a
 .env file in the project root (gitignored) -- same pattern as whatsapp.py, so
 this works identically whether imported from the Streamlit app process or the
-standalone check_watchlist.py script run by launchd.
-"""
+standalone check_watchlist.py script run by launchd / GitHub Actions.
+
+On Streamlit Community Cloud specifically, secrets set via the app's own
+"Secrets" panel surface ONLY through st.secrets, never as real OS environment
+variables -- so _get_credential() falls back to st.secrets when the env var
+isn't set. That fallback is a no-op everywhere else (standalone script, local
+launchd, GitHub Actions all already set real env vars via .env / repo
+secrets, and st.secrets simply isn't available outside a running Streamlit
+script -- caught and ignored here)."""
 import os
 import logging
 
@@ -15,8 +22,20 @@ load_dotenv()
 
 logger = logging.getLogger("trendline.telegram")
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+def _get_credential(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value:
+        return value
+    try:
+        import streamlit as st
+        return st.secrets.get(name)
+    except Exception:
+        return None
+
+
+TELEGRAM_BOT_TOKEN = _get_credential("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = _get_credential("TELEGRAM_CHAT_ID")
 
 
 def send_telegram_message(text: str, parse_mode: str | None = None) -> bool:

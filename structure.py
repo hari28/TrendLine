@@ -130,6 +130,44 @@ def analyze_structure(frame: pd.DataFrame, order: int = SWING_ORDER) -> dict:
     }
 
 
+def trend_history(frame: pd.DataFrame, order: int = SWING_ORDER) -> pd.Series:
+    """Same one-pass swing walk as analyze_structure, but returns the classified
+    trend ("Up"/"Down"/None, forward-filled between swing confirmations) at
+    EVERY bar instead of only the final snapshot. analyze_structure only needs
+    "what does structure look like today" (the Market Structure tab); a
+    backtest needs "what did it look like as of each historical day", so this
+    is a separate function rather than changing analyze_structure's contract."""
+    swing_high, swing_low = find_swings(frame["High"], frame["Low"], order)
+
+    def _classify(high_label, low_label):
+        if high_label == "HH" and low_label == "HL":
+            return "Up"
+        if high_label == "LH" and low_label == "LL":
+            return "Down"
+        return None
+
+    last_high_price = last_low_price = None
+    last_high_label = last_low_label = None
+    current = None
+    trend = [None] * len(frame)
+
+    for i in range(len(frame)):
+        if swing_high.iloc[i]:
+            h = frame["High"].iloc[i]
+            last_high_label = None if last_high_price is None else ("HH" if h > last_high_price else "LH")
+            last_high_price = h
+        if swing_low.iloc[i]:
+            lo = frame["Low"].iloc[i]
+            last_low_label = None if last_low_price is None else ("HL" if lo > last_low_price else "LL")
+            last_low_price = lo
+        classified = _classify(last_high_label, last_low_label)
+        if classified is not None:
+            current = classified
+        trend[i] = current
+
+    return pd.Series(trend, index=frame.index)
+
+
 def scan_symbol_structure(symbol: str, segment: str, timeframe: str, ma_type: str, order: int,
                            choch_lookback: int, force_refresh: bool = False) -> dict | None:
     frame = load_frame(symbol, timeframe, force_refresh=force_refresh)

@@ -46,6 +46,8 @@ import fo_universe
 import telegram_bot
 import backtest
 import cpr_ema_backtest
+import swing_backtest
+import fab4_backtest
 import call_log
 
 st.set_page_config(page_title="TrendLine", layout="wide")
@@ -1145,7 +1147,8 @@ with tab_structure:
 
 with tab_backtest:
     st.title("🧪 Backtest")
-    bt_strategy = st.radio("Strategy", ["Golden Cross", "CPR + EMA"], horizontal=True, key="bt_strategy")
+    bt_strategy = st.radio("Strategy", ["Golden Cross", "CPR + EMA", "Swing Strategy", "FAB 4"], horizontal=True,
+                            key="bt_strategy")
     st.divider()
 
 if bt_strategy == "Golden Cross":
@@ -1320,6 +1323,225 @@ elif bt_strategy == "CPR + EMA":
 
         st.subheader("Trades")
         st.dataframe(cbt_trades, use_container_width=True, hide_index=True)
+
+elif bt_strategy == "Swing Strategy":
+  with tab_backtest:
+    st.subheader("Swing Strategy Backtest")
+    st.caption(
+        "Two positional-swing entries, both built around one rule: stop-loss = Entry − 1.5× ATR(14), "
+        "scaled to each stock's own volatility — skip the trade if that implies >4.5% risk, rather "
+        "than shrinking the stop to fit (an artificially tight stop just gets whipsawed). "
+        "Target = max(2× actual risk, 5%). **Volatility Contraction Breakout** — 200 EMA trend filter "
+        "+ Narrow CPR + close above CPR Top on volume ≥1.5× average. **Trend Pullback Entry** — "
+        "Market Structure uptrend + pullback to the rising 20 EMA + reclaim above the pullback bar's "
+        "high. One trade per symbol at a time, long-only."
+    )
+
+    swbt_strategy_label = st.radio(
+        "Which strategy", ["Volatility Contraction Breakout", "Trend Pullback Entry", "Both"],
+        horizontal=True, key="swbt_strategy_label",
+    )
+    swbt_strategy_key = {"Volatility Contraction Breakout": "breakout", "Trend Pullback Entry": "pullback",
+                          "Both": "both"}[swbt_strategy_label]
+
+    swbt_universes = st.multiselect(
+        "Universe", ["Nifty 100 (Large Cap)", "Nifty Midcap 150", "Nifty Smallcap 250"],
+        default=["Nifty 100 (Large Cap)", "Nifty Midcap 150"], key="swbt_universes",
+    )
+
+    swbt_col1, swbt_col2, swbt_col3 = st.columns(3)
+    swbt_start_date = swbt_col1.date_input("Start date", value=pd.Timestamp("2020-01-01"), key="swbt_start_date")
+    swbt_risk_per_trade = swbt_col2.number_input(
+        "Portfolio sim: risk % of capital per trade", min_value=0.1, max_value=5.0, value=1.0, step=0.1,
+        key="swbt_risk_per_trade",
+    )
+    swbt_max_concurrent = swbt_col3.number_input(
+        "Portfolio sim: max concurrent positions", min_value=1, max_value=100, value=20, step=1,
+        key="swbt_max_concurrent",
+    )
+    swbt_force_refresh = st.checkbox("Force-refresh price history (ignore cache)", key="swbt_force_refresh")
+
+    if st.button("▶️ Run Swing Strategy Backtest", type="primary"):
+        if not swbt_universes:
+            st.warning("Pick at least one universe first.")
+        else:
+            swbt_symbols_df = get_all_symbols(swbt_universes, force_refresh=swbt_force_refresh)[["Symbol", "Segment"]]
+            swbt_symbols = list(swbt_symbols_df.itertuples(index=False, name=None))
+
+            swbt_progress = st.progress(0.0)
+            swbt_status = st.empty()
+            swbt_start = time.time()
+
+            def _swbt_cb(i, total, symbol):
+                swbt_progress.progress((i + 1) / total)
+                swbt_status.text(f"[{i+1}/{total}] {symbol}")
+
+            swbt_trades = swing_backtest.run_backtest(
+                swbt_strategy_key, swbt_symbols, start_date=str(swbt_start_date), progress_cb=_swbt_cb,
+                force_refresh=swbt_force_refresh,
+            )
+            swbt_elapsed = time.time() - swbt_start
+            swbt_status.text(f"Done in {swbt_elapsed:.0f}s — {len(swbt_trades)} trade(s) generated.")
+
+            st.session_state["swbt_trades"] = swbt_trades
+            st.session_state["swbt_ran_at"] = pd.Timestamp.now()
+
+    swbt_trades = st.session_state.get("swbt_trades")
+
+    if swbt_trades is None:
+        st.info("Click **Run Swing Strategy Backtest** above. First run is slow (full history fetch "
+                 "per stock); later runs reuse the local cache and are fast.")
+    elif swbt_trades.empty:
+        st.warning("No qualifying trades for this universe/date range.")
+    else:
+        st.caption(f"Last run: {st.session_state['swbt_ran_at']:%Y-%m-%d %H:%M}")
+
+        for swbt_label in swbt_trades["Strategy"].unique():
+            swbt_sub = swbt_trades[swbt_trades["Strategy"] == swbt_label]
+            swbt_summary = swing_backtest.summarize(swbt_sub)
+            swbt_port = swing_backtest.simulate_portfolio(
+                swbt_sub, risk_per_trade_pct=swbt_risk_per_trade, max_concurrent=int(swbt_max_concurrent),
+            )
+
+            st.markdown(f"#### {swbt_label}")
+            swbt_c1, swbt_c2, swbt_c3, swbt_c4, swbt_c5 = st.columns(5)
+            swbt_c1.metric("Closed trades", swbt_summary["closed_trades"])
+            swbt_c2.metric("Win rate", f"{swbt_summary['win_rate_pct']:.1f}%"
+                           if pd.notna(swbt_summary["win_rate_pct"]) else "—")
+            swbt_c3.metric("Expectancy / trade", f"{swbt_summary['expectancy_pct']:.2f}%"
+                           if pd.notna(swbt_summary["expectancy_pct"]) else "—")
+            swbt_c4.metric("Portfolio return", f"{swbt_port['total_return_pct']:.1f}%",
+                           help=f"Started at 100, risking {swbt_risk_per_trade}% per trade, "
+                                f"max {int(swbt_max_concurrent)} concurrent, no leverage.")
+            swbt_c5.metric("Portfolio max drawdown", f"{swbt_port['max_drawdown_pct']:.2f}%"
+                           if pd.notna(swbt_port["max_drawdown_pct"]) else "—")
+            st.caption(
+                f"Avg winner: {swbt_summary['avg_win_pct']:.2f}% · Avg loser: {swbt_summary['avg_loss_pct']:.2f}% "
+                f"· Trades taken: {swbt_port['trades_taken']} · skipped (no free slot): {swbt_port['trades_skipped']}"
+            )
+
+            if not swbt_port["equity_curve"].empty:
+                swbt_fig = go.Figure()
+                swbt_fig.add_trace(go.Scatter(
+                    x=swbt_port["equity_curve"].index, y=swbt_port["equity_curve"].values,
+                    mode="lines", name="Capital",
+                ))
+                swbt_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10),
+                                        yaxis_title="Capital (started at 100)", xaxis_title="Exit date")
+                st.plotly_chart(swbt_fig, use_container_width=True)
+
+        if swbt_strategy_key == "both":
+            swbt_port_combined = swing_backtest.simulate_portfolio(
+                swbt_trades, risk_per_trade_pct=swbt_risk_per_trade, max_concurrent=int(swbt_max_concurrent),
+            )
+            st.markdown("#### Combined (both strategies, shared capital & slots)")
+            swbt_cc1, swbt_cc2 = st.columns(2)
+            swbt_cc1.metric("Portfolio return", f"{swbt_port_combined['total_return_pct']:.1f}%")
+            swbt_cc2.metric("Portfolio max drawdown", f"{swbt_port_combined['max_drawdown_pct']:.2f}%"
+                            if pd.notna(swbt_port_combined["max_drawdown_pct"]) else "—")
+
+        st.subheader("Trades")
+        st.dataframe(swbt_trades, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download all trades (CSV)", swbt_trades.to_csv(index=False),
+            file_name=f"swing_backtest_{swbt_strategy_key}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+        )
+
+elif bt_strategy == "FAB 4":
+  with tab_backtest:
+    st.subheader("FAB 4 (\"Fabulous Four\") Backtest")
+    st.caption(
+        "Location-based intraday strategy: before the open, box in the highest and lowest of "
+        "{20-day SMA, 200-day SMA, prior close, prior day's last ~45-min high/low range} — that "
+        "box is the FAB4 block. Today opens above it → long-only bias for the day; opens below → "
+        "short-only; opens inside → sit out, location is ambiguous. Then the \"color game\": on any "
+        "bar (any color), mark its extreme in the bias direction — the next bar that breaks that "
+        "level is your entry, stop at that triggering bar's opposite extreme (risk one bar). Repeats "
+        "through the day for multiple legs."
+    )
+    st.warning(
+        "**Two deviations from the source video, both necessary and documented in fab4_backtest.py:** "
+        "runs on 5-min bars, not 2-min (Yahoo's free feed doesn't offer 2-min history at all); and "
+        "since the video never specifies an exit beyond \"risk one bar for the chance of winning "
+        "many,\" this adds a trailing stop (ratchets on each new trend-confirming bar) plus a "
+        "per-direction max-legs-per-day cap, forced flat at session close. Also: Yahoo only retains "
+        "60 days of 5-min history, so this backtest can only ever cover the last ~60 trading days, "
+        "not a multi-year window like the other three."
+    )
+
+    fab4_universe = st.multiselect(
+        "Universe", ["Nifty 100 (Large Cap)", "Nifty Midcap 150", "Nifty Smallcap 250"],
+        default=["Nifty 100 (Large Cap)"], key="fab4_universe",
+    )
+    fab4_force_refresh = st.checkbox("Force-refresh price history (ignore cache)", key="fab4_force_refresh")
+
+    if st.button("▶️ Run FAB 4 Backtest", type="primary"):
+        if not fab4_universe:
+            st.warning("Pick at least one universe first.")
+        else:
+            fab4_symbols_df = get_all_symbols(fab4_universe, force_refresh=fab4_force_refresh)[["Symbol", "Segment"]]
+            fab4_symbols = list(fab4_symbols_df.itertuples(index=False, name=None))
+
+            fab4_progress = st.progress(0.0)
+            fab4_status = st.empty()
+            fab4_start = time.time()
+
+            def _fab4_cb(i, total, symbol):
+                fab4_progress.progress((i + 1) / total)
+                fab4_status.text(f"[{i+1}/{total}] {symbol}")
+
+            fab4_trades = fab4_backtest.run_backtest(fab4_symbols, progress_cb=_fab4_cb,
+                                                       force_refresh=fab4_force_refresh)
+            fab4_elapsed = time.time() - fab4_start
+            fab4_status.text(f"Done in {fab4_elapsed:.0f}s — {len(fab4_trades)} trade(s) generated.")
+
+            st.session_state["fab4_trades"] = fab4_trades
+            st.session_state["fab4_ran_at"] = pd.Timestamp.now()
+
+    fab4_trades = st.session_state.get("fab4_trades")
+
+    if fab4_trades is None:
+        st.info("Click **Run FAB 4 Backtest** above. First run is slow (5-min history fetch per "
+                 "stock); later runs reuse the local cache and are fast.")
+    elif fab4_trades.empty:
+        st.warning("No qualifying trades for this universe (no day had a clean above/below-block "
+                    "open, or no color-game trigger fired).")
+    else:
+        st.caption(f"Last run: {st.session_state['fab4_ran_at']:%Y-%m-%d %H:%M}")
+
+        fab4_summary = fab4_backtest.summarize(fab4_trades)
+        fab4_c1, fab4_c2, fab4_c3, fab4_c4 = st.columns(4)
+        fab4_c1.metric("Total trades", fab4_summary["total_trades"])
+        fab4_c2.metric("Win rate", f"{fab4_summary['win_rate_pct']:.1f}%"
+                        if pd.notna(fab4_summary["win_rate_pct"]) else "—")
+        fab4_c3.metric("Avg return / trade", f"{fab4_summary['avg_return_pct']:.3f}%"
+                        if pd.notna(fab4_summary["avg_return_pct"]) else "—")
+        fab4_c4.metric("Max drawdown", f"{fab4_summary['max_drawdown_pct']:.2f}%"
+                        if pd.notna(fab4_summary["max_drawdown_pct"]) else "—")
+        st.caption(
+            f"Avg winner: {fab4_summary['avg_win_pct']:.3f}% · Avg loser: {fab4_summary['avg_loss_pct']:.3f}% "
+            f"· Long/Short split: {(fab4_trades['Direction'] == 'Long').sum()} / "
+            f"{(fab4_trades['Direction'] == 'Short').sum()} "
+            "· Drawdown is on an equity curve that compounds each trade in entry-time order "
+            "(a simplification — in reality multiple symbols can be in a trade at once)."
+        )
+
+        fab4_equity = (1 + fab4_trades.sort_values("EntryTime")["ReturnPct"] / 100).cumprod()
+        fab4_fig = go.Figure()
+        fab4_fig.add_trace(go.Scatter(
+            x=fab4_trades.sort_values("EntryTime")["EntryTime"], y=fab4_equity,
+            mode="lines", name="Equity (x initial capital)",
+        ))
+        fab4_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10),
+                                yaxis_title="Equity multiple", xaxis_title="Entry time")
+        st.plotly_chart(fab4_fig, use_container_width=True)
+
+        st.subheader("Trades")
+        st.dataframe(fab4_trades, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download all trades (CSV)", fab4_trades.to_csv(index=False),
+            file_name=f"fab4_backtest_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+        )
 
 with tab_calls:
     st.title("📞 Call Performance")
