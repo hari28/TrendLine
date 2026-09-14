@@ -6,7 +6,7 @@
   crossed the 200-period EMA/SMA (golden cross = up, death cross = down)?
 """
 import pandas as pd
-from indicators import sma, ema, build_frame, TIMEFRAMES
+from indicators import sma, ema, rsi, build_frame, TIMEFRAMES
 from data_fetcher import fetch_daily_history, fetch_intraday_history
 from patterns import detect_triangle, detect_channel, detect_flag_pole
 
@@ -317,3 +317,144 @@ def scan_universe_pattern(symbols: pd.DataFrame, timeframe: str, pattern_types: 
         rows.extend(scan_symbol_pattern(r.Symbol, r.Segment, timeframe, pattern_types, lookback, pole_min_move_pct,
                                          force_refresh=force_refresh))
     return pd.DataFrame(rows, columns=PATTERN_COLUMNS)
+
+
+# ---------------------------------------------------------------------------
+# Mode 5: RSI range -- flags stocks whose RSI(length) currently sits between
+# a lower and upper bound (default period 14, bounds 30/70 -- i.e. "neither
+# overbought nor oversold"). The same 14/30/70 values are reused by
+# scalping_backtest.py's entry filter, so "avoid an already-extended RSI" is
+# applied consistently everywhere RSI gates an entry in this app.
+# ---------------------------------------------------------------------------
+
+def scan_symbol_rsi(symbol: str, segment: str, timeframe: str, rsi_period: int, rsi_min: float,
+                     rsi_max: float, force_refresh: bool = False) -> dict | None:
+    frame = load_frame(symbol, timeframe, force_refresh=force_refresh)
+    if frame is None or len(frame) < rsi_period + 2:
+        return None
+
+    close = frame["Close"]
+    rsi_value = rsi(close, rsi_period).iloc[-1]
+
+    if pd.isna(rsi_value):
+        status = "Insufficient history"
+    elif rsi_value < rsi_min:
+        status = "Oversold"
+    elif rsi_value > rsi_max:
+        status = "Overbought"
+    else:
+        status = "In Range"
+
+    return {
+        "Symbol": symbol,
+        "Segment": segment,
+        "Close": close.iloc[-1],
+        "AsOf": frame.index[-1],
+        "Volume": frame["Volume"].iloc[-1],
+        "RSI": rsi_value,
+        "Status": status,
+    }
+
+
+def scan_universe_rsi(symbols: pd.DataFrame, timeframe: str, rsi_period: int, rsi_min: float, rsi_max: float,
+                       progress_cb=None, force_refresh: bool = False) -> pd.DataFrame:
+    rows = []
+    total = len(symbols)
+    for i, r in enumerate(symbols.itertuples(index=False)):
+        if progress_cb:
+            progress_cb(i, total, r.Symbol)
+        result = scan_symbol_rsi(r.Symbol, r.Segment, timeframe, rsi_period, rsi_min, rsi_max,
+                                  force_refresh=force_refresh)
+        if result:
+            rows.append(result)
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Mode 6: Aged All-Time-High breakout -- flags stocks that have just CONFIRMED
+# a breakout (min_confirm_bars consecutive closes above the level, not a
+# single-candle cross that can be a whipsaw/fakeout) over an all-time high
+# that is itself at least min_age_years old -- a genuinely multi-year-dormant
+# level finally giving way, not just any ordinary new high. The classic chart
+# shape this looks for: a big high set years ago, a long multi-year base/
+# decline under it, then price finally reclaiming and holding above it.
+# ---------------------------------------------------------------------------
+
+def scan_symbol_aged_ath(symbol: str, segment: str, timeframe: str, min_age_years: float,
+                          min_confirm_bars: int = 2, force_refresh: bool = False) -> dict | None:
+    frame = load_frame(symbol, timeframe, force_refresh=force_refresh)
+    if frame is None or len(frame) < max(30, min_confirm_bars + 5):
+        return None
+
+    n = min_confirm_bars
+    high, close, volume = frame["High"], frame["Close"], frame["Volume"]
+    last_close = float(close.iloc[-1])
+    last_date = frame.index[-1]
+
+    # The ATH is computed over every bar EXCLUDING the last N (the
+    # confirmation window itself), so the breakout attempt can never inflate
+    # its own breakout level -- "age" naturally comes out ~0 for a stock
+    # that's simply making routine fresh highs, without needing a separate
+    # "exclude recent window" rule.
+    prior_high = high.iloc[:-n]
+    if prior_high.empty:
+        return {"Symbol": symbol, "Segment": segment, "Close": last_close, "AsOf": last_date,
+                "Volume": float(volume.iloc[-1]), "ATH": float("nan"), "ATHDate": pd.NaT,
+                "AgeYears": float("nan"), "PctFromATH": float("nan"), "Status": "Insufficient history"}
+
+    ath_idx = prior_high.idxmax()  # first (oldest) occurrence if tied -- the ORIGINAL time it was set
+    ath_value = float(prior_high.loc[ath_idx])
+    age_years = (last_date - ath_idx).days / 365.25
+
+    recent_closes = close.iloc[-n:]
+    all_confirmed = bool((recent_closes > ath_value).all())  # every one of the last N candles closed above
+    currently_above = last_close > ath_value
+
+    # "Freshly confirmed" = the Nth consecutive close-above just completed on
+    # THIS bar -- the bar immediately before the N-bar confirmation window
+    # was NOT above the level, so this fires exactly once (the day
+    # confirmation completes), not on every later day the stock stays up.
+    if len(close) > n:
+        bar_before_window = float(close.iloc[-(n + 1)])
+        freshly_confirmed = all_confirmed and bar_before_window <= ath_value
+    else:
+        freshly_confirmed = all_confirmed  # not enough history before the window to check "freshness"
+
+    if age_years < min_age_years:
+        status = "ATH Too Recent"
+    elif freshly_confirmed:
+        status = "Fresh Aged Breakout"
+    elif all_confirmed:
+        status = "Above Aged ATH"
+    elif currently_above:
+        status = "Breakout Forming"  # above the level, but hasn't held for N candles yet -- not confirmed
+    else:
+        status = "Below ATH"
+
+    return {
+        "Symbol": symbol,
+        "Segment": segment,
+        "Close": last_close,
+        "AsOf": last_date,
+        "Volume": float(volume.iloc[-1]),
+        "ATH": ath_value,
+        "ATHDate": ath_idx,
+        "AgeYears": round(age_years, 1),
+        "PctFromATH": round((last_close - ath_value) / ath_value * 100.0, 2),
+        "Status": status,
+    }
+
+
+def scan_universe_aged_ath(symbols: pd.DataFrame, timeframe: str, min_age_years: float,
+                            min_confirm_bars: int = 2, progress_cb=None,
+                            force_refresh: bool = False) -> pd.DataFrame:
+    rows = []
+    total = len(symbols)
+    for i, r in enumerate(symbols.itertuples(index=False)):
+        if progress_cb:
+            progress_cb(i, total, r.Symbol)
+        result = scan_symbol_aged_ath(r.Symbol, r.Segment, timeframe, min_age_years,
+                                       min_confirm_bars=min_confirm_bars, force_refresh=force_refresh)
+        if result:
+            rows.append(result)
+    return pd.DataFrame(rows)

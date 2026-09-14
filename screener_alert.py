@@ -23,7 +23,7 @@ import pandas as pd
 
 from constituents import get_all_symbols, INDEX_UNIVERSE_LABEL
 from screener import (scan_universe, scan_universe_cross, scan_universe_volume, scan_universe_pattern,
-                       apply_band, apply_band_below)
+                       scan_universe_rsi, scan_universe_aged_ath, apply_band, apply_band_below)
 from telegram_bot import send_telegram_message
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -71,6 +71,12 @@ def _run_scan(config: dict, symbols_df: pd.DataFrame) -> pd.DataFrame:
     if mode.startswith("Unusual Volume"):
         return scan_universe_volume(symbols_df, timeframe, config["avg_period"], config["spike_multiple"],
                                      force_refresh=False)
+    if mode.startswith("RSI Range"):
+        return scan_universe_rsi(symbols_df, timeframe, config["rsi_period"], config["rsi_min"],
+                                  config["rsi_max"], force_refresh=False)
+    if mode.startswith("Aged ATH"):
+        return scan_universe_aged_ath(symbols_df, timeframe, config["ath_min_age_years"],
+                                       min_confirm_bars=config["ath_confirm_bars"], force_refresh=False)
     return scan_universe_pattern(symbols_df, timeframe, config["pattern_types"], config["pattern_lookback"],
                                   config["pole_min_move_pct"], force_refresh=False)
 
@@ -115,6 +121,17 @@ def qualifying_hits(config: dict, results: pd.DataFrame) -> list[dict]:
         return [{"symbol": r.Symbol, "segment": r.Segment, "close": r.Close, "detail": r.Activity,
                   "ma_value": "-"} for r in hits.itertuples()]
 
+    if mode.startswith("RSI Range"):
+        hits = results[results["Status"] == "In Range"]
+        return [{"symbol": r.Symbol, "segment": r.Segment, "close": r.Close,
+                  "detail": f"In Range — RSI {r.RSI:.1f}", "ma_value": "-"} for r in hits.itertuples()]
+
+    if mode.startswith("Aged ATH"):
+        hits = results[results["Status"] == "Fresh Aged Breakout"]
+        return [{"symbol": r.Symbol, "segment": r.Segment, "close": r.Close,
+                  "detail": f"Fresh breakout over a {r.AgeYears:.1f}yr-old high (₹{r.ATH:.2f})",
+                  "ma_value": "-"} for r in hits.itertuples()]
+
     return [{"symbol": r.Symbol, "segment": r.Segment, "close": r.Close,
               "detail": f"{r.Pattern} ({r.Direction})", "ma_value": "-"} for r in results.itertuples()]
 
@@ -153,7 +170,25 @@ def _format_message(now_ist: datetime, config: dict, hits: list[dict]) -> str:
         blocks.append("\n".join(lines))
 
     count_line = f"{len(hits)} match{'es' if len(hits) != 1 else ''}:"
-    body = "\n\n".join(blocks)
+
+    # Telegram hard-caps messages at 4096 chars; telegram_bot.send_telegram_message
+    # slices to that limit as a last-resort safety net, but a raw character slice
+    # can land mid-tag (e.g. "...<b>Stock: FOO</" ) and break HTML parsing entirely
+    # -- confirmed live once a scan mode (RSI Range, "In Range" being the common
+    # case for most stocks) started regularly producing enough hits to exceed it.
+    # Truncate at whole BLOCK boundaries here instead, so every tag this function
+    # emits always has its matching close tag in the final message.
+    budget = 4096 - len(f"{header}\n\n{count_line}\n\n") - 60  # headroom for the "+N more" footer
+    kept, used = [], 0
+    for block in blocks:
+        block_len = len(block) + 2  # + the "\n\n" separator that will join it
+        if kept and used + block_len > budget:
+            break
+        kept.append(block)
+        used += block_len
+    body = "\n\n".join(kept)
+    if len(kept) < len(blocks):
+        body += f"\n\n… and {len(blocks) - len(kept)} more not shown (Telegram's message length limit)."
     return f"{header}\n\n{count_line}\n\n{body}"
 
 

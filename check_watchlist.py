@@ -13,11 +13,12 @@ Digest" for details:
      cadence internally, so it's safe to call every cycle.
   2. The ad-hoc "alert me on this scan" cycle (screener_alert.py) -- only
      during live trading hours (Mon-Fri 9:15-15:30).
-  3. Paper trading (paper_trading.py) -- the two intraday Iron Condor
-     strategies are checked every cycle during trading hours (they need to
-     react to same-day entry/exit windows); the six daily/weekly equity
-     strategies are checked once, in the 15:30-16:00 post-close window,
-     since a day's own bar isn't meaningfully final before then.
+  3. Paper trading (paper_trading.py) -- all eight strategies are checked
+     once, in the 15:30-16:00 post-close window (seven hold positions
+     across days and get a fresh entry/exit check; EMA Scalping's trades
+     resolve within the same session, so its check just logs the day's
+     already-resolved trades), since a day's own bar isn't meaningfully
+     final before then.
 
 A file lock prevents two invocations from ever running concurrently -- the
 first-ever universe digest cycle has to cold-fetch ~500 stocks and can take
@@ -119,18 +120,16 @@ def main():
         else:
             parts.append(f"cpr: skipped ({cpr_result.get('reason', 'n/a')})")
 
-        if _is_trading_hours(now_ist):
-            for strat in paper_trading.INTRADAY_STRATEGIES:
-                try:
-                    r = paper_trading.run_iron_condor_cycle(strat)
-                    parts.append(f"paper[{strat}]: {r}")
-                except Exception as e:
-                    parts.append(f"paper[{strat}]: ERROR {e}")
-
         if _is_post_close_window(now_ist):
             for strat in paper_trading.DAILY_BAR_STRATEGIES:
                 try:
                     r = paper_trading.run_daily_cycle(strat)
+                    parts.append(f"paper[{strat}]: {r}")
+                except Exception as e:
+                    parts.append(f"paper[{strat}]: ERROR {e}")
+            for strat in paper_trading.SAME_DAY_STRATEGIES:
+                try:
+                    r = paper_trading.run_same_day_cycle(strat)
                     parts.append(f"paper[{strat}]: {r}")
                 except Exception as e:
                     parts.append(f"paper[{strat}]: ERROR {e}")
