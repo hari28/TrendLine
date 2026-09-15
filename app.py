@@ -25,6 +25,8 @@ This is a screening tool, not investment advice. It surfaces candidates for
 you to apply your own entry/exit discipline (stop-loss, position size, risk
 per trade) to -- it does not decide trades for you.
 """
+import glob
+import os
 import time
 from datetime import datetime
 import pandas as pd
@@ -50,6 +52,7 @@ import swing_backtest
 import momentum_backtest
 import scalping_backtest
 import bigmoney_swing_backtest
+import oliver_ma_cross_backtest
 import paper_trading
 import call_log
 
@@ -1271,7 +1274,7 @@ with tab_backtest:
     st.title("🧪 Backtest")
     bt_strategy = st.radio(
         "Strategy", ["Golden Cross", "CPR + EMA", "Swing Strategy", "Momentum Screener", "EMA Scalping",
-                     "Big Money Swing (Approximation)"],
+                     "Big Money Swing (Approximation)", "Oliver's 20 & 200"],
         horizontal=True, key="bt_strategy")
     st.divider()
 
@@ -1447,6 +1450,123 @@ elif bt_strategy == "CPR + EMA":
 
         st.subheader("Trades")
         st.dataframe(cbt_trades, use_container_width=True, hide_index=True)
+
+elif bt_strategy == "Oliver's 20 & 200":
+  with tab_backtest:
+    st.subheader("Oliver's 20 & 200 — MA Crossover Backtest")
+    st.warning(
+        "**Scoping note:** 5-minute data comes from your Kite account via the MCP bridge, which "
+        "only works inside a Claude session — this Streamlit process can't call it directly. So "
+        "the price history below is a one-off snapshot pulled and cached to "
+        "`data/kite_5min/<SYMBOL>.csv`, not a live feed. Ask Claude to re-pull it for a fresher or "
+        "longer window. Universe: all 100 Nifty 100 stocks + the NIFTY 50 index are cached "
+        "(~3 months each, RELIANCE has ~6.5 months). Midcap/Smallcap aren't pulled yet."
+    )
+    st.caption(
+        "LONG: fast MA crosses above slow MA (5-min bars). SHORT: fast MA crosses below slow MA. "
+        "Entry at the crossover bar's close. Exit at a fixed stop-loss or target %, whichever is "
+        "hit first (stop-loss assumed to win if a bar touches both). One trade at a time per symbol."
+    )
+
+    olv_cache_dir = oliver_ma_cross_backtest.KITE_5MIN_DIR
+    olv_available_symbols = sorted(
+        os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(olv_cache_dir, "*.csv"))
+    ) or ["RELIANCE"]
+    olv_nifty100_symbols = [s for s in olv_available_symbols if s in set(
+        get_all_symbols(["Nifty 100 (Large Cap)"])["Symbol"]
+    )]
+
+    olv_universe_options = ["Nifty 100 (Large Cap)", "NIFTY 50 Index", "Custom selection"]
+    olv_universe = st.selectbox("Universe", olv_universe_options, key="olv_universe")
+
+    if olv_universe == "Nifty 100 (Large Cap)":
+        olv_symbols = olv_nifty100_symbols
+        st.caption(f"{len(olv_symbols)} stocks selected.")
+    elif olv_universe == "NIFTY 50 Index":
+        olv_symbols = ["NIFTY50"] if "NIFTY50" in olv_available_symbols else []
+        if not olv_symbols:
+            st.warning("NIFTY 50 index data not cached yet — ask Claude to pull it via Kite.")
+    else:
+        olv_symbols = st.multiselect("Symbols", olv_available_symbols, default=olv_available_symbols,
+                                      key="olv_symbols")
+
+    olv_col1, olv_col2, olv_col3 = st.columns(3)
+    olv_ma_type = olv_col1.radio("MA type", ["SMA", "EMA"], horizontal=True, key="olv_ma_type")
+    olv_sl_pct = olv_col2.slider("Stop-loss (%)", min_value=0.25, max_value=10.0,
+                                  value=oliver_ma_cross_backtest.DEFAULT_SL_PCT, step=0.25, key="olv_sl_pct")
+    olv_target_pct = olv_col3.slider("Target (%)", min_value=0.25, max_value=100.0,
+                                      value=oliver_ma_cross_backtest.DEFAULT_TARGET_PCT, step=0.25,
+                                      key="olv_target_pct")
+
+    olv_col5, olv_col6 = st.columns(2)
+    olv_fast = olv_col5.number_input("Fast MA period", value=oliver_ma_cross_backtest.FAST_PERIOD, step=1,
+                                      key="olv_fast")
+    olv_slow = olv_col6.number_input("Slow MA period", value=oliver_ma_cross_backtest.SLOW_PERIOD, step=1,
+                                      key="olv_slow")
+
+    if st.button("▶️ Run Oliver's 20 & 200 Backtest", type="primary", disabled=not olv_symbols):
+        olv_trades = oliver_ma_cross_backtest.run_backtest(
+            olv_symbols, ma_type=olv_ma_type, fast=int(olv_fast), slow=int(olv_slow),
+            sl_pct=olv_sl_pct, target_pct=olv_target_pct,
+        )
+        st.session_state["olv_trades"] = olv_trades
+        st.session_state["olv_ran_at"] = pd.Timestamp.now()
+
+    olv_trades = st.session_state.get("olv_trades")
+
+    if olv_trades is None:
+        st.info("Click **Run Oliver's 20 & 200 Backtest** above.")
+    elif olv_trades.empty:
+        st.warning(
+            "No crossover signals produced a trade — either no 5-min data is cached yet for this "
+            "symbol (ask Claude to pull it via Kite), or not enough bars for the slow MA to warm up."
+        )
+    else:
+        st.caption(f"Last run: {st.session_state['olv_ran_at']:%Y-%m-%d %H:%M}")
+
+        olv_summary = oliver_ma_cross_backtest.summarize(olv_trades)
+        olv_c1, olv_c2, olv_c3, olv_c4 = st.columns(4)
+        olv_c1.metric("Closed trades", olv_summary["closed_trades"],
+                      help=f"{olv_summary['open_trades']} still open (never hit target/stop) as of latest data.")
+        olv_c2.metric("Win rate", f"{olv_summary['win_rate_pct']:.1f}%"
+                      if pd.notna(olv_summary["win_rate_pct"]) else "—")
+        olv_c3.metric("Avg return / trade", f"{olv_summary['avg_return_pct']:.2f}%"
+                      if pd.notna(olv_summary["avg_return_pct"]) else "—")
+        olv_c4.metric("Max drawdown", f"{olv_summary['max_drawdown_pct']:.2f}%"
+                      if pd.notna(olv_summary["max_drawdown_pct"]) else "—")
+        st.caption(
+            f"Avg winner: {olv_summary['avg_win_pct']:.2f}% · Avg loser: {olv_summary['avg_loss_pct']:.2f}% "
+            "· Long/Short split: "
+            f"{(olv_trades['Direction'] == 'Long').sum()} / {(olv_trades['Direction'] == 'Short').sum()}"
+        )
+
+        if olv_trades["Symbol"].nunique() > 1:
+            st.subheader("Per-symbol breakdown")
+            olv_per_symbol = []
+            for sym, grp in olv_trades.groupby("Symbol"):
+                grp_closed = grp[grp["ExitReason"] != "Open (end of data)"]
+                olv_per_symbol.append({
+                    "Symbol": sym, "Trades": len(grp),
+                    "Win rate %": round((grp_closed["ReturnPct"] > 0).mean() * 100, 1) if len(grp_closed) else None,
+                    "Avg return %": round(grp_closed["ReturnPct"].mean(), 2) if len(grp_closed) else None,
+                })
+            st.dataframe(pd.DataFrame(olv_per_symbol).sort_values("Avg return %", ascending=False),
+                         use_container_width=True, hide_index=True)
+
+        olv_closed = olv_trades[olv_trades["ExitReason"] != "Open (end of data)"]
+        if not olv_closed.empty:
+            olv_equity = oliver_ma_cross_backtest.equity_curve_from_trades(olv_closed)
+            olv_fig = go.Figure()
+            olv_fig.add_trace(go.Scatter(
+                x=olv_closed.sort_values("EntryTime")["EntryTime"], y=olv_equity,
+                mode="lines", name="Equity (x initial capital)",
+            ))
+            olv_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10),
+                                   yaxis_title="Equity multiple", xaxis_title="Entry time")
+            st.plotly_chart(olv_fig, use_container_width=True)
+
+        st.subheader("Trades")
+        st.dataframe(olv_trades, use_container_width=True, hide_index=True)
 
 elif bt_strategy == "Swing Strategy":
   with tab_backtest:
