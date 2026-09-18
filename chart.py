@@ -14,6 +14,7 @@ from plotly.subplots import make_subplots
 
 from indicators import sma, ema
 from structure import analyze_structure
+from ott import calc_ott, crossover, crossunder
 
 _MA_COLORS = {10: "#FFA500", 20: "#008000", 50: "#FF0000", 200: "#000000"}  # orange, green, red, black
 
@@ -130,6 +131,7 @@ def build_candles_with_volume_profile(full_frame: pd.DataFrame, symbol: str, tim
     fig.update_layout(
         title=title,
         xaxis_rangeslider_visible=False,
+        dragmode="pan",
         height=520,
         margin=dict(l=40, r=20, t=50, b=30),
         bargap=0.05,
@@ -176,10 +178,95 @@ def build_ma_overlay_chart(full_frame: pd.DataFrame, symbol: str, timeframe_labe
     fig.update_layout(
         title=title,
         xaxis_rangeslider_visible=False,
+        dragmode="pan",
         height=560,
         margin=dict(l=40, r=20, t=50, b=30),
         legend=dict(orientation="h", y=1.06),
     )
+    return fig
+
+
+def _add_signal_markers(fig, frame: pd.DataFrame, ott: pd.Series, buy_mask: pd.Series,
+                         sell_mask: pd.Series, row: int, col: int):
+    buy_y = ott.where(buy_mask) * 0.995
+    sell_y = ott.where(sell_mask) * 1.005
+    fig.add_trace(
+        go.Scatter(x=frame.index, y=buy_y, mode="markers+text", text="Buy", textposition="bottom center",
+                   textfont=dict(color="white", size=9), marker=dict(symbol="triangle-up", size=11, color="green"),
+                   showlegend=False, name="OTT Buy", hoverinfo="skip"),
+        row=row, col=col,
+    )
+    fig.add_trace(
+        go.Scatter(x=frame.index, y=sell_y, mode="markers+text", text="Sell", textposition="top center",
+                   textfont=dict(color="white", size=9), marker=dict(symbol="triangle-down", size=11, color="red"),
+                   showlegend=False, name="OTT Sell", hoverinfo="skip"),
+        row=row, col=col,
+    )
+
+
+def add_ott_overlay(fig, full_frame: pd.DataFrame, display_bars: int, length: int = 2, percent: float = 1.4,
+                     ma_type: str = "VAR", show_support: bool = True, highlighting: bool = True,
+                     highlight_color_changes: bool = False, show_signals_support: bool = True,
+                     show_signals_price: bool = False, show_signals_color_change: bool = False,
+                     row: int = 1, col: int = 1):
+    """Adds Anil Ozeksi's Optimized Trend Tracker (OTT) to an existing candlestick figure
+    (e.g. from build_ma_overlay_chart) -- ported 1:1 from the original Pine Script v4 source,
+    including its default look: a blue "Support Line" (the underlying MA), a purple OTT trend
+    line, a green/red fill between price and the OTT line, and Buy/Sell labels where the
+    Support Line crosses the OTT line. full_frame must be the COMPLETE OHLC history so the
+    stop levels/crossovers are accurate from the first displayed bar."""
+    ott_full = calc_ott(full_frame, length=length, percent=percent, ma_type=ma_type)
+    ohlc4_full = (full_frame["Open"] + full_frame["High"] + full_frame["Low"] + full_frame["Close"]) / 4
+
+    buy_support_full = crossover(ott_full["MAvg"], ott_full["OTT"])
+    sell_support_full = crossunder(ott_full["MAvg"], ott_full["OTT"])
+    buy_price_full = crossover(full_frame["Close"], ott_full["OTT"])
+    sell_price_full = crossunder(full_frame["Close"], ott_full["OTT"])
+    buy_color_full = crossover(ott_full["OTT"], ott_full["OTT"].shift(1))
+    sell_color_full = crossunder(ott_full["OTT"], ott_full["OTT"].shift(1))
+
+    frame = full_frame.tail(display_bars)
+    ott = ott_full.tail(display_bars)
+    ohlc4 = ohlc4_full.tail(display_bars)
+
+    if show_support:
+        fig.add_trace(
+            go.Scatter(x=frame.index, y=ott["MAvg"], mode="lines", name="OTT Support",
+                       line=dict(width=2, color="#0585E1")),
+            row=row, col=col,
+        )
+
+    if highlighting:
+        up_ott = ott["OTT"].where(ott["MAvg"] > ott["OTT"])
+        down_ott = ott["OTT"].where(ott["MAvg"] < ott["OTT"])
+        for band, fillcolor in ((up_ott, "rgba(0,128,0,0.15)"), (down_ott, "rgba(255,0,0,0.15)")):
+            fig.add_trace(go.Scatter(x=frame.index, y=ohlc4, mode="lines", line=dict(width=0),
+                                      showlegend=False, hoverinfo="skip"), row=row, col=col)
+            fig.add_trace(go.Scatter(x=frame.index, y=band, mode="lines", line=dict(width=0),
+                                      fill="tonexty", fillcolor=fillcolor, showlegend=False,
+                                      hoverinfo="skip"), row=row, col=col)
+
+    if highlight_color_changes:
+        up_line = ott["OTT"].where(ott["trend_up"])
+        down_line = ott["OTT"].where(~ott["trend_up"])
+        fig.add_trace(go.Scatter(x=frame.index, y=up_line, mode="lines", name="OTT",
+                                  line=dict(width=2, color="#00A800")), row=row, col=col)
+        fig.add_trace(go.Scatter(x=frame.index, y=down_line, mode="lines", name="OTT",
+                                  line=dict(width=2, color="#FF0000"), showlegend=False), row=row, col=col)
+    else:
+        fig.add_trace(go.Scatter(x=frame.index, y=ott["OTT"], mode="lines", name="OTT",
+                                  line=dict(width=2, color="#B800D9")), row=row, col=col)
+
+    if show_signals_support:
+        _add_signal_markers(fig, frame, ott["OTT"], buy_support_full.tail(display_bars),
+                             sell_support_full.tail(display_bars), row, col)
+    if show_signals_price:
+        _add_signal_markers(fig, frame, ott["OTT"], buy_price_full.tail(display_bars),
+                             sell_price_full.tail(display_bars), row, col)
+    if show_signals_color_change:
+        _add_signal_markers(fig, frame, ott["OTT"], buy_color_full.tail(display_bars),
+                             sell_color_full.tail(display_bars), row, col)
+
     return fig
 
 
@@ -246,6 +333,7 @@ def build_structure_chart(full_frame: pd.DataFrame, symbol: str, timeframe_label
     fig.update_layout(
         title=title,
         xaxis_rangeslider_visible=False,
+        dragmode="pan",
         height=560,
         margin=dict(l=40, r=20, t=50, b=30),
         legend=dict(orientation="h", y=1.06),

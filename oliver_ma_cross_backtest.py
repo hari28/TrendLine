@@ -7,11 +7,14 @@ Strategy (user-specified, 2026-09-15):
   SHORT entry: fast MA crosses BELOW the slow MA. Classic Golden Cross /
   Death Cross, applied on 5-minute intraday bars.
 - MA type is user-selectable per run: SMA (classic convention) or EMA.
-- Exit: fixed stop-loss % and target %, whichever is hit first, checked
+- Exit: fixed stop-loss and target, whichever is hit first, checked
   bar-by-bar from the bar after entry (conservative: if a bar's High/Low
   range touches both, stop-loss is assumed to hit first). Entry fill is
   assumed at the crossover bar's own close -- same simplification used in
-  cpr_ema_backtest_intraday.py.
+  cpr_ema_backtest_intraday.py. SL/target can be set either as a % of the
+  entry price, or as absolute points (e.g. NIFTY entry 24000, 20-point
+  target -> exit at 24020) -- the user's own convention for index trading,
+  where a flat point distance is more natural than a %.
 - One trade at a time per symbol: a new crossover signal is ignored while
   a prior trade on that symbol is still open.
 
@@ -30,6 +33,7 @@ from indicators import sma, ema
 
 FAST_PERIOD, SLOW_PERIOD = 20, 200
 DEFAULT_SL_PCT, DEFAULT_TARGET_PCT = 1.0, 2.0
+DEFAULT_SL_POINTS, DEFAULT_TARGET_POINTS = 20.0, 40.0
 KITE_5MIN_DIR = os.path.join(os.path.dirname(__file__), "data", "kite_5min")
 
 
@@ -69,7 +73,10 @@ def find_crossovers(frame: pd.DataFrame, ma_type: str, fast: int, slow: int) -> 
 
 
 def backtest_symbol(symbol: str, ma_type: str = "EMA", fast: int = FAST_PERIOD, slow: int = SLOW_PERIOD,
-                     sl_pct: float = DEFAULT_SL_PCT, target_pct: float = DEFAULT_TARGET_PCT) -> list[dict]:
+                     sl_value: float = DEFAULT_SL_PCT, target_value: float = DEFAULT_TARGET_PCT,
+                     unit: str = "pct") -> list[dict]:
+    """unit: "pct" (sl_value/target_value are % of entry price) or "points"
+    (sl_value/target_value are an absolute price distance, e.g. NIFTY points)."""
     frame = load_kite_5min(symbol)
     if frame is None or len(frame) < slow + 5:
         return []
@@ -84,12 +91,17 @@ def backtest_symbol(symbol: str, ma_type: str = "EMA", fast: int = FAST_PERIOD, 
         entry_price = float(frame["Close"].iloc[cross_idx])
         entry_time = frame.index[cross_idx]
 
-        if direction == "Long":
-            sl_price = entry_price * (1 - sl_pct / 100)
-            target_price = entry_price * (1 + target_pct / 100)
+        if unit == "points":
+            sl_dist, target_dist = sl_value, target_value
         else:
-            sl_price = entry_price * (1 + sl_pct / 100)
-            target_price = entry_price * (1 - target_pct / 100)
+            sl_dist, target_dist = entry_price * sl_value / 100, entry_price * target_value / 100
+
+        if direction == "Long":
+            sl_price = entry_price - sl_dist
+            target_price = entry_price + target_dist
+        else:
+            sl_price = entry_price + sl_dist
+            target_price = entry_price - target_dist
 
         exit_idx, exit_price, exit_reason = None, None, None
         for k in range(cross_idx + 1, len(frame)):
@@ -136,11 +148,12 @@ def backtest_symbol(symbol: str, ma_type: str = "EMA", fast: int = FAST_PERIOD, 
 
 
 def run_backtest(symbols: list[str], ma_type: str = "EMA", fast: int = FAST_PERIOD, slow: int = SLOW_PERIOD,
-                  sl_pct: float = DEFAULT_SL_PCT, target_pct: float = DEFAULT_TARGET_PCT) -> pd.DataFrame:
+                  sl_value: float = DEFAULT_SL_PCT, target_value: float = DEFAULT_TARGET_PCT,
+                  unit: str = "pct") -> pd.DataFrame:
     all_trades = []
     for symbol in symbols:
         all_trades.extend(backtest_symbol(symbol, ma_type=ma_type, fast=fast, slow=slow,
-                                           sl_pct=sl_pct, target_pct=target_pct))
+                                           sl_value=sl_value, target_value=target_value, unit=unit))
     trades = pd.DataFrame(all_trades)
     if not trades.empty:
         trades = trades.sort_values("EntryTime").reset_index(drop=True)

@@ -40,7 +40,8 @@ from screener import (scan_universe, apply_band, apply_band_below, scan_universe
                        scan_universe_aged_ath, scan_symbol_aged_ath)
 from indicators import TIMEFRAMES
 from market_data import get_fii_dii_activity, deals_for_symbols
-from chart import build_candles_with_volume_profile, build_ma_overlay_chart, build_structure_chart
+from chart import build_candles_with_volume_profile, build_ma_overlay_chart, build_structure_chart, add_ott_overlay
+from ott import MA_TYPES as OTT_MA_TYPES
 import screener_alert
 import cpr
 import structure
@@ -53,10 +54,15 @@ import momentum_backtest
 import scalping_backtest
 import bigmoney_swing_backtest
 import oliver_ma_cross_backtest
+import cpr_rsi_scalp_backtest
 import paper_trading
 import call_log
 
 st.set_page_config(page_title="TrendLine", layout="wide")
+
+# TradingView-style chart interaction everywhere: scroll wheel zooms, drag pans (paired with
+# dragmode="pan" on each figure's layout) instead of plotly's default click-drag zoom box.
+PLOTLY_CONFIG = {"scrollZoom": True, "displaylogo": False}
 
 TF_KEYS = list(TIMEFRAMES.keys())
 TF_LABELS = [TIMEFRAMES[k]["label"] for k in TF_KEYS]
@@ -139,6 +145,36 @@ def render_ma_toggles(key_prefix: str, ma_type: str, periods: tuple = MA_PERIODS
     return tuple(selected)
 
 
+def render_ott_controls(key_prefix: str) -> dict | None:
+    """Optimized Trend Tracker (OTT) toggle + settings, mirroring the original Pine Script's
+    defaults (length=2, percent=1.4, MA type VAR). Returns a kwargs dict for add_ott_overlay(),
+    or None if the indicator is switched off."""
+    show = st.checkbox("Show OTT (Optimized Trend Tracker)", value=False, key=f"{key_prefix}_ott_on")
+    if not show:
+        return None
+    with st.expander("OTT settings", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        length = c1.number_input("OTT Period", min_value=1, value=2, step=1, key=f"{key_prefix}_ott_length")
+        percent = c2.number_input("OTT Percent", min_value=0.0, value=1.4, step=0.1, key=f"{key_prefix}_ott_percent")
+        ma_type = c3.selectbox("Moving Average Type", OTT_MA_TYPES, index=0, key=f"{key_prefix}_ott_ma_type")
+        c4, c5 = st.columns(2)
+        show_support = c4.checkbox("Show Support Line?", value=True, key=f"{key_prefix}_ott_support")
+        highlighting = c5.checkbox("Highlighter On/Off?", value=True, key=f"{key_prefix}_ott_highlighting")
+        c6, c7, c8 = st.columns(3)
+        show_signals_support = c6.checkbox("Show Support Line Crossing Signals?", value=True,
+                                            key=f"{key_prefix}_ott_sig_support")
+        show_signals_price = c7.checkbox("Show Price/OTT Crossing Signals?", value=False,
+                                          key=f"{key_prefix}_ott_sig_price")
+        highlight_color_changes = c8.checkbox("Show OTT Color Changes?", value=False,
+                                               key=f"{key_prefix}_ott_color_changes")
+        show_signals_color_change = st.checkbox("Show OTT Color Change Signals?", value=False,
+                                                 key=f"{key_prefix}_ott_sig_color")
+    return dict(length=int(length), percent=float(percent), ma_type=ma_type, show_support=show_support,
+                highlighting=highlighting, highlight_color_changes=highlight_color_changes,
+                show_signals_support=show_signals_support, show_signals_price=show_signals_price,
+                show_signals_color_change=show_signals_color_change)
+
+
 def render_chart_picker(symbols: list, timeframe_key: str, timeframe_label: str, ma_type: str, key_prefix: str,
                          force_refresh: bool = False):
     """A symbol picker + 'Show chart' button rendering a candlestick chart with
@@ -166,7 +202,7 @@ def render_chart_picker(symbols: list, timeframe_key: str, timeframe_label: str,
         else:
             fig = build_ma_overlay_chart(full, shown_symbol, timeframe_label, ma_type, periods=periods,
                                           display_bars=int(bars))
-            st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_fig", config={'scrollZoom': True})
+            st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_fig", config=PLOTLY_CONFIG)
 
 
 def render_deals_panel(universe_choice: str):
@@ -842,13 +878,16 @@ with tab_stock_chart:
         bars = st.number_input("Bars to show", min_value=50, max_value=1000, value=250, step=25,
                                 key="stock_chart_bars")
         stock_chart_periods = render_ma_toggles("stock_chart", ma_type)
+        stock_chart_ott = render_ott_controls("stock_chart")
 
         if full is None or full.empty:
             st.error(f"Couldn't fetch usable price history for {searched_symbol} on {tf_choice_label}.")
         else:
             fig = build_ma_overlay_chart(full, searched_symbol, tf_choice_label, ma_type,
                                           periods=stock_chart_periods, display_bars=int(bars))
-            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+            if stock_chart_ott is not None:
+                add_ott_overlay(fig, full, display_bars=int(bars), **stock_chart_ott)
+            st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         render_telegram_send_button(
             "stock_chart",
@@ -902,7 +941,7 @@ with tab_volume_profile:
             fig, poc_price = build_candles_with_volume_profile(frame, shown_symbol, shown_tf_label, shown_bins,
                                                                  ma_type=ma_type, periods=vp_periods,
                                                                  display_bars=shown_bars)
-            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+            st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
             last_close = float(frame["Close"].iloc[-1])
             vp_records = [{"Symbol": shown_symbol, "Close": round(last_close, 2), "POC": round(poc_price, 2),
                             "Bars": shown_bars}]
@@ -1258,7 +1297,7 @@ with tab_structure:
                     structure_fig = build_structure_chart(structure_full, structure_shown_symbol, structure_tf_label,
                                                             int(structure_order), display_bars=int(structure_chart_bars))
                     st.plotly_chart(structure_fig, use_container_width=True, key="structure_fig",
-                                     config={'scrollZoom': True})
+                                     config=PLOTLY_CONFIG)
 
     render_telegram_send_button(
         "structure",
@@ -1274,7 +1313,7 @@ with tab_backtest:
     st.title("🧪 Backtest")
     bt_strategy = st.radio(
         "Strategy", ["Golden Cross", "CPR + EMA", "Swing Strategy", "Momentum Screener", "EMA Scalping",
-                     "Big Money Swing (Approximation)", "Oliver's 20 & 200"],
+                     "Big Money Swing (Approximation)", "Oliver's 20 & 200", "CPR Scalper (MA + RSI + CPR)"],
         horizontal=True, key="bt_strategy")
     st.divider()
 
@@ -1352,9 +1391,9 @@ if bt_strategy == "Golden Cross":
                 x=bt_closed.sort_values("EntryDate")["EntryDate"], y=bt_equity,
                 mode="lines", name="Equity (x initial capital)",
             ))
-            bt_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10),
+            bt_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10), dragmode="pan",
                                   yaxis_title="Equity multiple", xaxis_title="Entry date")
-            st.plotly_chart(bt_fig, use_container_width=True)
+            st.plotly_chart(bt_fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         st.subheader("Trades")
         st.dataframe(bt_trades, use_container_width=True, hide_index=True)
@@ -1444,9 +1483,9 @@ elif bt_strategy == "CPR + EMA":
             x=cbt_trades.sort_values("EntryDate")["EntryDate"], y=cbt_equity,
             mode="lines", name="Equity (x initial capital)",
         ))
-        cbt_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10),
+        cbt_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10), dragmode="pan",
                                yaxis_title="Equity multiple", xaxis_title="Entry date")
-        st.plotly_chart(cbt_fig, use_container_width=True)
+        st.plotly_chart(cbt_fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         st.subheader("Trades")
         st.dataframe(cbt_trades, use_container_width=True, hide_index=True)
@@ -1464,8 +1503,9 @@ elif bt_strategy == "Oliver's 20 & 200":
     )
     st.caption(
         "LONG: fast MA crosses above slow MA (5-min bars). SHORT: fast MA crosses below slow MA. "
-        "Entry at the crossover bar's close. Exit at a fixed stop-loss or target %, whichever is "
-        "hit first (stop-loss assumed to win if a bar touches both). One trade at a time per symbol."
+        "Entry at the crossover bar's close. Exit at a fixed stop-loss or target (in % of entry "
+        "price, or absolute points), whichever is hit first (stop-loss assumed to win if a bar "
+        "touches both). One trade at a time per symbol."
     )
 
     olv_cache_dir = oliver_ma_cross_backtest.KITE_5MIN_DIR
@@ -1490,13 +1530,27 @@ elif bt_strategy == "Oliver's 20 & 200":
         olv_symbols = st.multiselect("Symbols", olv_available_symbols, default=olv_available_symbols,
                                       key="olv_symbols")
 
-    olv_col1, olv_col2, olv_col3 = st.columns(3)
+    olv_col1, olv_col2 = st.columns(2)
     olv_ma_type = olv_col1.radio("MA type", ["SMA", "EMA"], horizontal=True, key="olv_ma_type")
-    olv_sl_pct = olv_col2.slider("Stop-loss (%)", min_value=0.25, max_value=10.0,
-                                  value=oliver_ma_cross_backtest.DEFAULT_SL_PCT, step=0.25, key="olv_sl_pct")
-    olv_target_pct = olv_col3.slider("Target (%)", min_value=0.25, max_value=100.0,
-                                      value=oliver_ma_cross_backtest.DEFAULT_TARGET_PCT, step=0.25,
-                                      key="olv_target_pct")
+    olv_unit_label = olv_col2.radio("SL/Target unit", ["% of entry price", "Points"], horizontal=True,
+                                     key="olv_unit_label")
+    olv_unit = "points" if olv_unit_label == "Points" else "pct"
+
+    olv_col3, olv_col4 = st.columns(2)
+    if olv_unit == "points":
+        olv_sl_value = olv_col3.slider("Stop-loss (points)", min_value=1.0, max_value=500.0,
+                                        value=oliver_ma_cross_backtest.DEFAULT_SL_POINTS, step=1.0,
+                                        key="olv_sl_points")
+        olv_target_value = olv_col4.slider("Target (points)", min_value=1.0, max_value=1000.0,
+                                            value=oliver_ma_cross_backtest.DEFAULT_TARGET_POINTS, step=1.0,
+                                            key="olv_target_points")
+    else:
+        olv_sl_value = olv_col3.slider("Stop-loss (%)", min_value=0.25, max_value=10.0,
+                                        value=oliver_ma_cross_backtest.DEFAULT_SL_PCT, step=0.25,
+                                        key="olv_sl_pct")
+        olv_target_value = olv_col4.slider("Target (%)", min_value=0.25, max_value=100.0,
+                                            value=oliver_ma_cross_backtest.DEFAULT_TARGET_PCT, step=0.25,
+                                            key="olv_target_pct")
 
     olv_col5, olv_col6 = st.columns(2)
     olv_fast = olv_col5.number_input("Fast MA period", value=oliver_ma_cross_backtest.FAST_PERIOD, step=1,
@@ -1507,7 +1561,7 @@ elif bt_strategy == "Oliver's 20 & 200":
     if st.button("▶️ Run Oliver's 20 & 200 Backtest", type="primary", disabled=not olv_symbols):
         olv_trades = oliver_ma_cross_backtest.run_backtest(
             olv_symbols, ma_type=olv_ma_type, fast=int(olv_fast), slow=int(olv_slow),
-            sl_pct=olv_sl_pct, target_pct=olv_target_pct,
+            sl_value=olv_sl_value, target_value=olv_target_value, unit=olv_unit,
         )
         st.session_state["olv_trades"] = olv_trades
         st.session_state["olv_ran_at"] = pd.Timestamp.now()
@@ -1561,12 +1615,184 @@ elif bt_strategy == "Oliver's 20 & 200":
                 x=olv_closed.sort_values("EntryTime")["EntryTime"], y=olv_equity,
                 mode="lines", name="Equity (x initial capital)",
             ))
-            olv_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10),
+            olv_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10), dragmode="pan",
                                    yaxis_title="Equity multiple", xaxis_title="Entry time")
-            st.plotly_chart(olv_fig, use_container_width=True)
+            st.plotly_chart(olv_fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         st.subheader("Trades")
-        st.dataframe(olv_trades, use_container_width=True, hide_index=True)
+
+        def _olv_fmt_dt(ts) -> str:
+            hour = ts.strftime("%I").lstrip("0") or "12"
+            return f"{ts.strftime('%d-%b-%Y')} {hour}.{ts.strftime('%M')} {ts.strftime('%p').lower()}"
+
+        olv_trades_show = pd.DataFrame({
+            "Symbol": olv_trades["Symbol"],
+            "Direction": olv_trades["Direction"],
+            "MA Type": [f"{r.MAType}, {_olv_fmt_dt(r.EntryTime)}" for r in olv_trades.itertuples()],
+            "Entry": olv_trades["EntryPrice"],
+            "SL": olv_trades["SLPrice"],
+            "Target": olv_trades["TargetPrice"],
+            "Exit Price": [f"{r.ExitPrice:.2f}, {_olv_fmt_dt(r.ExitTime)}" for r in olv_trades.itertuples()],
+            "Exit Reason": olv_trades["ExitReason"],
+            "Return %": olv_trades["ReturnPct"],
+        })
+        st.dataframe(
+            olv_trades_show, use_container_width=True, hide_index=True,
+            column_config={
+                "Entry": st.column_config.NumberColumn(format="%.2f"),
+                "SL": st.column_config.NumberColumn(format="%.2f"),
+                "Target": st.column_config.NumberColumn(format="%.2f"),
+                "Return %": st.column_config.NumberColumn(format="%.2f%%"),
+            },
+        )
+
+elif bt_strategy == "CPR Scalper (MA + RSI + CPR)":
+  with tab_backtest:
+    st.subheader("CPR Scalper — MA Cross + RSI + Nearest CPR Level")
+    st.warning(
+        "**Scoping note:** same one-off Kite 5-min snapshot as Oliver's 20 & 200 "
+        "(`data/kite_5min/<SYMBOL>.csv`), not a live feed — ask Claude to re-pull it for a fresher "
+        "or longer window."
+    )
+    st.caption(
+        "LONG: fast MA crosses above slow MA (5-min bars), AND RSI(14) is above the Long threshold "
+        "on the cross bar's close. SHORT: fast MA crosses below slow MA, AND RSI(14) is below the "
+        "Short threshold. A crossover that fails the RSI check is not traded at all. "
+        "**Target:** the nearest CPR level above entry for a Long / below entry for a Short "
+        "(BC, TC, R1 or R2 — CPR for the day is derived from the prior day's High/Low/Close in this "
+        "same 5-min dataset). **Stop-loss:** the cross bar's own Low (Long) / High (Short) — not "
+        "specified in the original rules, a practical default. One trade at a time per symbol."
+    )
+
+    cs_cache_dir = oliver_ma_cross_backtest.KITE_5MIN_DIR
+    cs_available_symbols = sorted(
+        os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(cs_cache_dir, "*.csv"))
+    ) or ["RELIANCE"]
+    cs_nifty100_symbols = [s for s in cs_available_symbols if s in set(
+        get_all_symbols(["Nifty 100 (Large Cap)"])["Symbol"]
+    )]
+
+    cs_universe_options = ["Nifty 100 (Large Cap)", "NIFTY 50 Index", "Custom selection"]
+    cs_universe = st.selectbox("Universe", cs_universe_options, key="cs_universe")
+
+    if cs_universe == "Nifty 100 (Large Cap)":
+        cs_symbols = cs_nifty100_symbols
+        st.caption(f"{len(cs_symbols)} stocks selected.")
+    elif cs_universe == "NIFTY 50 Index":
+        cs_symbols = ["NIFTY50"] if "NIFTY50" in cs_available_symbols else []
+        if not cs_symbols:
+            st.warning("NIFTY 50 index data not cached yet — ask Claude to pull it via Kite.")
+    else:
+        cs_symbols = st.multiselect("Symbols", cs_available_symbols, default=cs_available_symbols,
+                                     key="cs_symbols")
+
+    cs_col1, cs_col2 = st.columns(2)
+    cs_ma_type = cs_col1.radio("MA type", ["SMA", "EMA"], horizontal=True, key="cs_ma_type")
+    cs_col1b, cs_col2b = st.columns(2)
+    cs_fast = cs_col1b.number_input("Fast MA period", value=oliver_ma_cross_backtest.FAST_PERIOD, step=1,
+                                     key="cs_fast")
+    cs_slow = cs_col2b.number_input("Slow MA period", value=oliver_ma_cross_backtest.SLOW_PERIOD, step=1,
+                                     key="cs_slow")
+
+    cs_col3, cs_col4 = st.columns(2)
+    cs_long_rsi_min = cs_col3.slider("Long RSI threshold (must be above)", min_value=0.0, max_value=100.0,
+                                      value=cpr_rsi_scalp_backtest.DEFAULT_LONG_RSI_MIN, step=1.0,
+                                      key="cs_long_rsi_min")
+    cs_short_rsi_max = cs_col4.slider("Short RSI threshold (must be below)", min_value=0.0, max_value=100.0,
+                                       value=cpr_rsi_scalp_backtest.DEFAULT_SHORT_RSI_MAX, step=1.0,
+                                       key="cs_short_rsi_max")
+
+    if st.button("▶️ Run CPR Scalper Backtest", type="primary", disabled=not cs_symbols):
+        cs_trades = cpr_rsi_scalp_backtest.run_backtest(
+            cs_symbols, ma_type=cs_ma_type, fast=int(cs_fast), slow=int(cs_slow),
+            long_rsi_min=cs_long_rsi_min, short_rsi_max=cs_short_rsi_max,
+        )
+        st.session_state["cs_trades"] = cs_trades
+        st.session_state["cs_ran_at"] = pd.Timestamp.now()
+
+    cs_trades = st.session_state.get("cs_trades")
+
+    if cs_trades is None:
+        st.info("Click **Run CPR Scalper Backtest** above.")
+    elif cs_trades.empty:
+        st.warning(
+            "No trade cleared both filters — either no 5-min data is cached yet for this symbol "
+            "(ask Claude to pull it via Kite), not enough bars for the slow MA to warm up, every "
+            "crossover failed the RSI check, or price was already past every CPR level on the day."
+        )
+    else:
+        st.caption(f"Last run: {st.session_state['cs_ran_at']:%Y-%m-%d %H:%M}")
+
+        cs_summary = oliver_ma_cross_backtest.summarize(cs_trades)
+        cs_c1, cs_c2, cs_c3, cs_c4 = st.columns(4)
+        cs_c1.metric("Closed trades", cs_summary["closed_trades"],
+                      help=f"{cs_summary['open_trades']} still open (never hit target/stop) as of latest data.")
+        cs_c2.metric("Win rate", f"{cs_summary['win_rate_pct']:.1f}%"
+                      if pd.notna(cs_summary["win_rate_pct"]) else "—")
+        cs_c3.metric("Avg return / trade", f"{cs_summary['avg_return_pct']:.2f}%"
+                      if pd.notna(cs_summary["avg_return_pct"]) else "—")
+        cs_c4.metric("Max drawdown", f"{cs_summary['max_drawdown_pct']:.2f}%"
+                      if pd.notna(cs_summary["max_drawdown_pct"]) else "—")
+        st.caption(
+            f"Avg winner: {cs_summary['avg_win_pct']:.2f}% · Avg loser: {cs_summary['avg_loss_pct']:.2f}% "
+            "· Long/Short split: "
+            f"{(cs_trades['Direction'] == 'Long').sum()} / {(cs_trades['Direction'] == 'Short').sum()}"
+        )
+
+        if cs_trades["Symbol"].nunique() > 1:
+            st.subheader("Per-symbol breakdown")
+            cs_per_symbol = []
+            for sym, grp in cs_trades.groupby("Symbol"):
+                grp_closed = grp[grp["ExitReason"] != "Open (end of data)"]
+                cs_per_symbol.append({
+                    "Symbol": sym, "Trades": len(grp),
+                    "Win rate %": round((grp_closed["ReturnPct"] > 0).mean() * 100, 1) if len(grp_closed) else None,
+                    "Avg return %": round(grp_closed["ReturnPct"].mean(), 2) if len(grp_closed) else None,
+                })
+            st.dataframe(pd.DataFrame(cs_per_symbol).sort_values("Avg return %", ascending=False),
+                         use_container_width=True, hide_index=True)
+
+        cs_closed = cs_trades[cs_trades["ExitReason"] != "Open (end of data)"]
+        if not cs_closed.empty:
+            cs_equity = oliver_ma_cross_backtest.equity_curve_from_trades(cs_closed)
+            cs_fig = go.Figure()
+            cs_fig.add_trace(go.Scatter(
+                x=cs_closed.sort_values("EntryTime")["EntryTime"], y=cs_equity,
+                mode="lines", name="Equity (x initial capital)",
+            ))
+            cs_fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10), dragmode="pan",
+                                  yaxis_title="Equity multiple", xaxis_title="Entry time")
+            st.plotly_chart(cs_fig, use_container_width=True, config=PLOTLY_CONFIG)
+
+        st.subheader("Trades")
+
+        def _cs_fmt_dt(ts) -> str:
+            hour = ts.strftime("%I").lstrip("0") or "12"
+            return f"{ts.strftime('%d-%b-%Y')} {hour}.{ts.strftime('%M')} {ts.strftime('%p').lower()}"
+
+        cs_trades_show = pd.DataFrame({
+            "Symbol": cs_trades["Symbol"],
+            "Direction": cs_trades["Direction"],
+            "MA Type": [f"{r.MAType}, {_cs_fmt_dt(r.EntryTime)}" for r in cs_trades.itertuples()],
+            "Entry": cs_trades["EntryPrice"],
+            "RSI@Entry": cs_trades["RSIAtEntry"],
+            "SL": cs_trades["SLPrice"],
+            "Target": cs_trades["TargetPrice"],
+            "Target Level": cs_trades["TargetLevel"],
+            "Exit Price": [f"{r.ExitPrice:.2f}, {_cs_fmt_dt(r.ExitTime)}" for r in cs_trades.itertuples()],
+            "Exit Reason": cs_trades["ExitReason"],
+            "Return %": cs_trades["ReturnPct"],
+        })
+        st.dataframe(
+            cs_trades_show, use_container_width=True, hide_index=True,
+            column_config={
+                "Entry": st.column_config.NumberColumn(format="%.2f"),
+                "RSI@Entry": st.column_config.NumberColumn(format="%.1f"),
+                "SL": st.column_config.NumberColumn(format="%.2f"),
+                "Target": st.column_config.NumberColumn(format="%.2f"),
+                "Return %": st.column_config.NumberColumn(format="%.2f%%"),
+            },
+        )
 
 elif bt_strategy == "Swing Strategy":
   with tab_backtest:
@@ -1670,9 +1896,9 @@ elif bt_strategy == "Swing Strategy":
                     x=swbt_port["equity_curve"].index, y=swbt_port["equity_curve"].values,
                     mode="lines", name="Capital",
                 ))
-                swbt_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10),
+                swbt_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), dragmode="pan",
                                         yaxis_title="Capital (started at 100)", xaxis_title="Exit date")
-                st.plotly_chart(swbt_fig, use_container_width=True)
+                st.plotly_chart(swbt_fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         if swbt_strategy_key == "both":
             swbt_port_combined = swing_backtest.simulate_portfolio(
@@ -1793,9 +2019,9 @@ elif bt_strategy == "Momentum Screener":
                     x=mom_port["equity_curve"].index, y=mom_port["equity_curve"].values,
                     mode="lines", name="Capital",
                 ))
-                mom_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10),
+                mom_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), dragmode="pan",
                                        yaxis_title="Capital (started at 100)", xaxis_title="Exit date")
-                st.plotly_chart(mom_fig, use_container_width=True)
+                st.plotly_chart(mom_fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         st.subheader("Trades")
         st.dataframe(mom_trades, use_container_width=True, hide_index=True)
@@ -1912,9 +2138,9 @@ elif bt_strategy == "EMA Scalping":
                 x=ema_port["equity_curve"].index, y=ema_port["equity_curve"].values,
                 mode="lines", name="Capital",
             ))
-            ema_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10),
+            ema_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), dragmode="pan",
                                    yaxis_title="Capital (started at 100)", xaxis_title="Exit time")
-            st.plotly_chart(ema_fig, use_container_width=True)
+            st.plotly_chart(ema_fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         st.subheader("Trades")
         st.dataframe(ema_trades, use_container_width=True, hide_index=True)
@@ -2025,9 +2251,9 @@ elif bt_strategy == "Big Money Swing (Approximation)":
                 x=bm_port["equity_curve"].index, y=bm_port["equity_curve"].values,
                 mode="lines", name="Capital",
             ))
-            bm_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10),
+            bm_fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), dragmode="pan",
                                    yaxis_title="Capital (started at 100)", xaxis_title="Exit date")
-            st.plotly_chart(bm_fig, use_container_width=True)
+            st.plotly_chart(bm_fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         st.subheader("Trades")
         st.dataframe(bm_trades, use_container_width=True, hide_index=True)
@@ -2074,6 +2300,7 @@ with tab_calls:
         else:
             with st.spinner("Marking calls to market..."):
                 calls_perf = call_log.with_performance(calls_filtered)
+                calls_perf = call_log.with_target_sl_exit(calls_perf)
 
             total_calls = len(calls_perf)
             winners = int((calls_perf["change_pct"] > 0).sum())
@@ -2088,18 +2315,30 @@ with tab_calls:
 
             calls_show = calls_perf.rename(columns={
                 "date": "Date", "time": "Time", "symbol": "Symbol", "segment": "Segment",
-                "signal_type": "Signal", "timeframe": "Timeframe", "close_at_call": "Close @ Call",
+                "signal_type": "Signal", "timeframe": "Timeframe", "entry_price": "Entry",
+                "target_price": "Target", "sl_price": "SL", "sold_at_price": "Sold At",
                 "current_close": "Close Now", "change_pct": "Change %", "days_since": "Days Since",
             })
-            calls_show = calls_show[["Date", "Time", "Symbol", "Signal", "Timeframe", "Close @ Call",
-                                      "Close Now", "Change %", "Days Since"]].sort_values(
+            calls_show["Sold At"] = calls_show["Sold At"].apply(
+                lambda v: f"{v:.2f}" if pd.notna(v) else "Open")
+            calls_show = calls_show[["Date", "Time", "Symbol", "Signal", "Timeframe", "Entry", "Target",
+                                      "SL", "Sold At", "Close Now", "Change %", "Days Since"]].sort_values(
                 ["Date", "Time"], ascending=False)
             calls_show["Date"] = calls_show["Date"].dt.strftime("%d-%b-%Y")
 
+            st.caption(
+                f"Target/SL applied uniformly to every call ({call_log.TARGET_PCT*100:.0f}% target / "
+                f"{call_log.STOP_PCT*100:.0f}% stop from the call's own price) — Golden Cross's own rule, "
+                "reused here for Above 200 EMA too since that signal has no target/SL of its own. "
+                "\"Sold At\" walks forward on daily closes from the call date; \"Open\" means neither "
+                "has been hit yet in the cached price history."
+            )
             st.dataframe(
                 calls_show, use_container_width=True, hide_index=True,
                 column_config={
-                    "Close @ Call": st.column_config.NumberColumn(format="%.2f"),
+                    "Entry": st.column_config.NumberColumn(format="%.2f"),
+                    "Target": st.column_config.NumberColumn(format="%.2f"),
+                    "SL": st.column_config.NumberColumn(format="%.2f"),
                     "Close Now": st.column_config.NumberColumn(format="%.2f"),
                     "Change %": st.column_config.NumberColumn(format="%.2f%%"),
                 },
@@ -2168,9 +2407,9 @@ with tab_calls:
                 x=pd.to_datetime(t["exit_date"]), y=t["capital_after"],
                 mode="lines+markers", name=paper_trading.STRATEGY_LABELS[s],
             ))
-        st_fig.update_layout(height=400, margin=dict(l=10, r=10, t=30, b=10),
+        st_fig.update_layout(height=400, margin=dict(l=10, r=10, t=30, b=10), dragmode="pan",
                               yaxis_title="Capital (₹)", xaxis_title="Exit date")
-        st.plotly_chart(st_fig, use_container_width=True)
+        st.plotly_chart(st_fig, use_container_width=True, config=PLOTLY_CONFIG)
     else:
         st.info("No closed trades yet on any strategy — the comparison chart will fill in as trades close. "
                 "This is expected on day one.")
