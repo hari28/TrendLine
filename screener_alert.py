@@ -23,7 +23,7 @@ import pandas as pd
 
 from constituents import get_all_symbols, INDEX_UNIVERSE_LABEL
 from screener import (scan_universe, scan_universe_cross, scan_universe_volume, scan_universe_pattern,
-                       scan_universe_rsi, scan_universe_aged_ath, apply_band, apply_band_below)
+                       scan_universe_rsi, scan_universe_aged_ath, scan_universe_ott, apply_band, apply_band_below)
 from telegram_bot import send_telegram_message
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -77,6 +77,10 @@ def _run_scan(config: dict, symbols_df: pd.DataFrame) -> pd.DataFrame:
     if mode.startswith("Aged ATH"):
         return scan_universe_aged_ath(symbols_df, timeframe, config["ath_min_age_years"],
                                        min_confirm_bars=config["ath_confirm_bars"], force_refresh=False)
+    if mode.startswith("OTT"):
+        return scan_universe_ott(symbols_df, timeframe, config["ott_length"], config["ott_percent"],
+                                  config["ott_ma_type"], config["ott_signal_type"], config["ott_lookback"],
+                                  force_refresh=False, source=config.get("ott_source", "Close"))
     return scan_universe_pattern(symbols_df, timeframe, config["pattern_types"], config["pattern_lookback"],
                                   config["pole_min_move_pct"], force_refresh=False)
 
@@ -131,6 +135,12 @@ def qualifying_hits(config: dict, results: pd.DataFrame) -> list[dict]:
         return [{"symbol": r.Symbol, "segment": r.Segment, "close": r.Close,
                   "detail": f"Fresh breakout over a {r.AgeYears:.1f}yr-old high (₹{r.ATH:.2f})",
                   "ma_value": "-"} for r in hits.itertuples()]
+
+    if mode.startswith("OTT"):
+        hits = results[results["Signal"].isin(["Buy", "Sell"])]
+        return [{"symbol": r.Symbol, "segment": r.Segment, "close": r.Close,
+                  "detail": f"OTT {r.Signal} — {config['ott_signal_type']}, {int(r.BarsAgo)} bar(s) ago",
+                  "ma_value": f"OTT: {r.OTT:.2f}"} for r in hits.itertuples()]
 
     return [{"symbol": r.Symbol, "segment": r.Segment, "close": r.Close,
               "detail": f"{r.Pattern} ({r.Direction})", "ma_value": "-"} for r in results.itertuples()]

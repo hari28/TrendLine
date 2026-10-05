@@ -26,6 +26,7 @@ you to apply your own entry/exit discipline (stop-loss, position size, risk
 per trade) to -- it does not decide trades for you.
 """
 import glob
+import json
 import os
 import time
 from datetime import datetime
@@ -37,11 +38,12 @@ from constituents import get_all_symbols, get_constituents, INDEX_UNIVERSE_LABEL
 from screener import (scan_universe, apply_band, apply_band_below, scan_universe_cross, scan_universe_volume,
                        load_frame, scan_symbol, scan_symbol_cross, scan_symbol_volume,
                        scan_universe_pattern, scan_symbol_pattern, scan_universe_rsi, scan_symbol_rsi,
-                       scan_universe_aged_ath, scan_symbol_aged_ath)
+                       scan_universe_aged_ath, scan_symbol_aged_ath, scan_universe_ott, scan_symbol_ott,
+                       OTT_SIGNAL_TYPES)
 from indicators import TIMEFRAMES
 from market_data import get_fii_dii_activity, deals_for_symbols
 from chart import build_candles_with_volume_profile, build_ma_overlay_chart, build_structure_chart, add_ott_overlay
-from ott import MA_TYPES as OTT_MA_TYPES
+from ott import MA_TYPES as OTT_MA_TYPES, SOURCES as OTT_SOURCES
 import screener_alert
 import cpr
 import structure
@@ -145,34 +147,109 @@ def render_ma_toggles(key_prefix: str, ma_type: str, periods: tuple = MA_PERIODS
     return tuple(selected)
 
 
+OTT_DEFAULTS = dict(source="Close", length=2, percent=1.4, ma_type="VAR", show_support=True,
+                    show_signals_support=True, show_signals_price=False, highlight_color_changes=False,
+                    show_signals_color_change=False, highlighting=False,
+                    # Style tab: only the two lines are visible by default
+                    show_ott=True, show_signals=False)
+
+
+OTT_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ott_settings.json")
+
+
+def _load_saved_ott() -> dict:
+    """User-saved OTT settings (only keys we know, with the same type as the default)."""
+    try:
+        with open(OTT_SETTINGS_FILE) as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in saved.items() if k in OTT_DEFAULTS and type(v) is type(OTT_DEFAULTS[k])}
+
+
+def _save_ott(key_prefix: str, core_only: bool):
+    """Merge this panel's current values into the saved-settings file."""
+    saved = _load_saved_ott()
+    for name in OTT_DEFAULTS:
+        if core_only and name not in ("source", "length", "percent", "ma_type"):
+            continue
+        key = f"{key_prefix}_ott_{name}"
+        if key in st.session_state:
+            saved[name] = st.session_state[key]
+    try:
+        os.makedirs(os.path.dirname(OTT_SETTINGS_FILE), exist_ok=True)
+        with open(OTT_SETTINGS_FILE, "w") as f:
+            json.dump(saved, f, indent=2)
+        st.toast("OTT settings saved — they'll load next time.", icon="💾")
+    except OSError as e:
+        st.toast(f"Couldn't save OTT settings: {e}", icon="⚠️")
+
+
+def _reset_ott(key_prefix: str, core_only: bool):
+    for name, value in OTT_DEFAULTS.items():
+        if core_only and name not in ("source", "length", "percent", "ma_type"):
+            continue
+        st.session_state[f"{key_prefix}_ott_{name}"] = value
+
+
+def _seed_ott_defaults(key_prefix: str, core_only: bool):
+    """Seed session state once so the widgets below carry no `value=` (which Streamlit warns
+    about when the Defaults button also sets them through the Session State API)."""
+    saved = _load_saved_ott()
+    for name, value in OTT_DEFAULTS.items():
+        if core_only and name not in ("source", "length", "percent", "ma_type"):
+            continue
+        st.session_state.setdefault(f"{key_prefix}_ott_{name}", saved.get(name, value))
+
+
+def _ott_core_inputs(key_prefix: str) -> tuple:
+    """Source / Period / Percent / MA type -- the inputs shared by the chart panel and the screener."""
+    source = st.selectbox("Source", OTT_SOURCES, key=f"{key_prefix}_ott_source")
+    length = st.number_input("OTT Period", min_value=1, step=1, key=f"{key_prefix}_ott_length")
+    percent = st.number_input("OTT Percent", min_value=0.0, step=0.01, format="%.2f",
+                              key=f"{key_prefix}_ott_percent")
+    ma_type = st.selectbox("Moving Average Type", OTT_MA_TYPES, key=f"{key_prefix}_ott_ma_type")
+    return source, int(length), float(percent), ma_type
+
+
 def render_ott_controls(key_prefix: str) -> dict | None:
-    """Optimized Trend Tracker (OTT) toggle + settings, mirroring the original Pine Script's
-    defaults (length=2, percent=1.4, MA type VAR). Returns a kwargs dict for add_ott_overlay(),
-    or None if the indicator is switched off."""
+    """Optimized Trend Tracker (OTT) settings panel, laid out like the indicator's TradingView
+    "Inputs" dialog. Returns a kwargs dict for add_ott_overlay(), or None if switched off."""
     show = st.checkbox("Show OTT (Optimized Trend Tracker)", value=False, key=f"{key_prefix}_ott_on")
     if not show:
         return None
-    with st.expander("OTT settings", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        length = c1.number_input("OTT Period", min_value=1, value=2, step=1, key=f"{key_prefix}_ott_length")
-        percent = c2.number_input("OTT Percent", min_value=0.0, value=1.4, step=0.1, key=f"{key_prefix}_ott_percent")
-        ma_type = c3.selectbox("Moving Average Type", OTT_MA_TYPES, index=0, key=f"{key_prefix}_ott_ma_type")
-        c4, c5 = st.columns(2)
-        show_support = c4.checkbox("Show Support Line?", value=True, key=f"{key_prefix}_ott_support")
-        highlighting = c5.checkbox("Highlighter On/Off?", value=True, key=f"{key_prefix}_ott_highlighting")
-        c6, c7, c8 = st.columns(3)
-        show_signals_support = c6.checkbox("Show Support Line Crossing Signals?", value=True,
-                                            key=f"{key_prefix}_ott_sig_support")
-        show_signals_price = c7.checkbox("Show Price/OTT Crossing Signals?", value=False,
-                                          key=f"{key_prefix}_ott_sig_price")
-        highlight_color_changes = c8.checkbox("Show OTT Color Changes?", value=False,
-                                               key=f"{key_prefix}_ott_color_changes")
-        show_signals_color_change = st.checkbox("Show OTT Color Change Signals?", value=False,
-                                                 key=f"{key_prefix}_ott_sig_color")
-    return dict(length=int(length), percent=float(percent), ma_type=ma_type, show_support=show_support,
-                highlighting=highlighting, highlight_color_changes=highlight_color_changes,
-                show_signals_support=show_signals_support, show_signals_price=show_signals_price,
-                show_signals_color_change=show_signals_color_change)
+    _seed_ott_defaults(key_prefix, core_only=False)
+    p = f"{key_prefix}_ott_"
+    with st.expander("⚙️ OTT settings", expanded=True):
+        tab_inputs, tab_style = st.tabs(["Inputs", "Style"])
+        with tab_inputs:
+            left, right = st.columns(2)
+            with left:
+                source, length, percent, ma_type = _ott_core_inputs(key_prefix)
+            with right:
+                show_signals_support = st.checkbox("Show Support Line Crossing Signals?",
+                                                    key=p + "show_signals_support")
+                show_signals_price = st.checkbox("Show Price/OTT Crossing Signals?",
+                                                  key=p + "show_signals_price")
+                highlight_color_changes = st.checkbox("Show OTT Color Changes?",
+                                                       key=p + "highlight_color_changes")
+                show_signals_color_change = st.checkbox("Show OTT Color Change Signals?",
+                                                         key=p + "show_signals_color_change")
+        with tab_style:
+            st.caption("Visibility -- untick to hide. Buy/Sell labels use the signal types chosen on the Inputs tab.")
+            show_ott = st.checkbox("OTT line", key=p + "show_ott")
+            show_support = st.checkbox("OTT Support line", key=p + "show_support")
+            highlighting = st.checkbox("Up/Down-trend highlighter (fill)", key=p + "highlighting")
+            show_signals = st.checkbox("Buy / Sell labels", key=p + "show_signals")
+        b1, b2, _ = st.columns([1, 1.3, 3])
+        b1.button("Defaults", key=f"{key_prefix}_ott_reset", on_click=_reset_ott, args=(key_prefix, False))
+        b2.button("💾 Save settings", key=f"{key_prefix}_ott_save", on_click=_save_ott, args=(key_prefix, False))
+    return dict(source=source, length=length, percent=percent, ma_type=ma_type, show_ott=show_ott,
+                show_support=show_support, highlighting=highlighting,
+                highlight_color_changes=highlight_color_changes,
+                show_signals_support=show_signals and show_signals_support,
+                show_signals_price=show_signals and show_signals_price,
+                show_signals_color_change=show_signals and show_signals_color_change)
 
 
 def render_chart_picker(symbols: list, timeframe_key: str, timeframe_label: str, ma_type: str, key_prefix: str,
@@ -243,7 +320,7 @@ with st.sidebar:
         "Scan type",
         ["Aged ATH Breakout", "Above 200 MA", "Below 200 MA", "Golden Cross / Death Cross (50 vs 200)",
          "Unusual Volume (Buying/Selling Spike)", "Chart Patterns (Triangle / Channel / Flag & Pole)",
-         "RSI Range (Overbought/Oversold Filter)"],
+         "RSI Range (Overbought/Oversold Filter)", "OTT (Optimized Trend Tracker) Signals"],
         index=1,
     )
 
@@ -256,6 +333,8 @@ with st.sidebar:
     pattern_types = pattern_lookback = pole_min_move_pct = None
     rsi_period = rsi_min = rsi_max = None
     ath_min_age_years = ath_confirm_bars = None
+    ott_length = ott_percent = ott_ma_type = ott_signal_type = ott_lookback = None
+    ott_source = "Close"
 
     if scan_mode == "Above 200 MA":
         band_low, band_high = st.slider(
@@ -288,6 +367,20 @@ with st.sidebar:
                                    value=70, step=1)
         st.caption(f"Screens for RSI({rsi_period}) currently between {rsi_min} and {rsi_max} — "
                    "neither overbought nor oversold.")
+    elif scan_mode.startswith("OTT"):
+        st.markdown("**OTT settings** (defaults match the original Pine Script)")
+        ott_signal_type = st.selectbox("Signal", OTT_SIGNAL_TYPES, index=0)
+        _seed_ott_defaults("scan", core_only=True)
+        ott_source, ott_length, ott_percent, ott_ma_type = _ott_core_inputs("scan")
+        b1, b2 = st.columns(2)
+        b1.button("Defaults", key="scan_ott_reset", on_click=_reset_ott, args=("scan", True))
+        b2.button("💾 Save", key="scan_ott_save", on_click=_save_ott, args=("scan", True))
+        ott_lookback = st.number_input("Treat a signal as \"recent\" if it fired within the last N bars",
+                                        min_value=1, max_value=50, value=3, step=1, key="scan_ott_lookback")
+        st.caption("Buy/Sell match the labels the Pine indicator draws: Support Line = the underlying "
+                   "moving average crossing the OTT line (indicator default), Price = the close crossing "
+                   "it, Colour change = the OTT line turning up/down. The sidebar's EMA/SMA choice does "
+                   "not apply here — OTT uses its own MA type above.")
     elif scan_mode.startswith("Aged ATH"):
         st.markdown("**Aged ATH Breakout settings**")
         with st.container(border=True):
@@ -354,6 +447,8 @@ with tab_screener:
         st.title("RSI Range Screener")
     elif scan_mode.startswith("Aged ATH"):
         st.title("Aged All-Time-High Breakout Screener")
+    elif scan_mode.startswith("OTT"):
+        st.title("OTT — Optimized Trend Tracker Screener")
     else:
         st.title("Chart Pattern Breakout Screener")
 
@@ -401,6 +496,10 @@ with tab_screener:
             results = scan_universe_aged_ath(symbols_df[["Symbol", "Segment"]], timeframe, ath_min_age_years,
                                               min_confirm_bars=int(ath_confirm_bars), progress_cb=_cb,
                                               force_refresh=force_refresh_prices)
+        elif scan_mode.startswith("OTT"):
+            results = scan_universe_ott(symbols_df[["Symbol", "Segment"]], timeframe, int(ott_length),
+                                         float(ott_percent), ott_ma_type, ott_signal_type, int(ott_lookback),
+                                         progress_cb=_cb, force_refresh=force_refresh_prices, source=ott_source)
         else:
             results = scan_universe_pattern(symbols_df[["Symbol", "Segment"]], timeframe, pattern_types,
                                              pattern_lookback, pole_min_move_pct, progress_cb=_cb,
@@ -421,6 +520,8 @@ with tab_screener:
             "pattern_lookback": pattern_lookback, "pole_min_move_pct": pole_min_move_pct,
             "rsi_period": rsi_period, "rsi_min": rsi_min, "rsi_max": rsi_max,
             "ath_min_age_years": ath_min_age_years, "ath_confirm_bars": ath_confirm_bars,
+            "ott_source": ott_source, "ott_length": ott_length, "ott_percent": ott_percent, "ott_ma_type": ott_ma_type,
+            "ott_signal_type": ott_signal_type, "ott_lookback": ott_lookback,
         }
         screener_alert.set_active_scan(scan_config)
         if screener_alert.send_snapshot_now(scan_config, results=results):
@@ -580,14 +681,21 @@ with tab_screener:
 
         elif scanned_mode.startswith("Golden Cross"):
             fast_col, slow_col = f"{scanned_ma}50", f"{scanned_ma}200"
-            display_cols = ["Symbol", "Close", "AsOf", fast_col, slow_col, "Volume"]
+            display_cols = ["Symbol", "Close", "AsOf", "CrossDate", "BarsSinceCross", fast_col, slow_col, "Volume"]
 
             def _fmt(d):
-                out = d[display_cols].copy()
+                out = d[display_cols].rename(columns={"CrossDate": "Crossed On", "BarsSinceCross": "Bars Ago"}).copy()
                 out["Close"] = out["Close"].round(2)
                 out[fast_col] = out[fast_col].round(2)
                 out[slow_col] = out[slow_col].round(2)
-                return out.sort_values(by="Symbol")
+                out["Crossed On"] = _fmt_asof(out["Crossed On"], scanned_tf_key)
+                out["Bars Ago"] = out["Bars Ago"].astype("Int64")
+                return out.sort_values(by=["Bars Ago", "Symbol"])  # most recent cross first
+
+            def _fmt_older(d):
+                out = _fmt(d.dropna(subset=["CrossDate"]))
+                out.insert(1, "Last Cross", d.dropna(subset=["CrossDate"]).loc[out.index, "LastCross"])
+                return out
 
             golden = df[df["CrossType"] == "Golden Cross"].copy()
             death = df[df["CrossType"] == "Death Cross"].copy()
@@ -617,8 +725,11 @@ with tab_screener:
                     file_name=f"death_cross_{scanned_ma}_{scanned_tf_key}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
                 )
 
-            with st.expander(f"No recent cross — {fast_col}/{slow_col} didn't cross recently ({len(no_cross)})"):
-                st.dataframe(_fmt(no_cross) if not no_cross.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
+            with st.expander(f"Older crosses — latest {fast_col}/{slow_col} cross was more than "
+                              f"{scanned_lookback} bars ago, most recent first ({len(no_cross)})"):
+                older = no_cross.dropna(subset=["CrossDate"])
+                st.dataframe(_fmt_older(older) if not older.empty else pd.DataFrame(),
+                             use_container_width=True, hide_index=True)
 
             with st.expander(f"Insufficient history for a 200-bar {scanned_ma} on this timeframe ({len(no_hist)})"):
                 st.dataframe(no_hist[["Symbol", "AsOf"]] if not no_hist.empty else pd.DataFrame(),
@@ -765,6 +876,48 @@ with tab_screener:
                 st.dataframe(no_hist[["Symbol", "AsOf"]] if not no_hist.empty else pd.DataFrame(),
                              use_container_width=True, hide_index=True)
 
+        elif scanned_mode.startswith("OTT"):
+            display_cols = ["Symbol", "Close", "AsOf", "OTT", "SupportLine", "Trend", "BarsAgo", "Volume"]
+
+            def _fmt(d):
+                out = d[display_cols].rename(columns={"SupportLine": "Support Line", "BarsAgo": "Bars Ago"}).copy()
+                for c in ("Close", "OTT", "Support Line"):
+                    out[c] = out[c].round(2)
+                return out.sort_values(by=["Bars Ago", "Symbol"])
+
+            buys = df[df["Signal"] == "Buy"].copy()
+            sells = df[df["Signal"] == "Sell"].copy()
+            no_signal = df[df["Signal"] == "No recent signal"].copy()
+            no_hist = df[df["Signal"] == "Insufficient history"].copy()
+
+            st.subheader(f"🟢 OTT Buy ({len(buys)})")
+            if buys.empty:
+                st.write("No OTT buy signals with these settings.")
+            else:
+                st.dataframe(_fmt(buys), use_container_width=True, hide_index=True)
+                st.download_button(
+                    "Download OTT Buy list (CSV)", _fmt(buys).to_csv(index=False),
+                    file_name=f"ott_buy_{scanned_tf_key}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+                )
+
+            st.subheader(f"🔴 OTT Sell ({len(sells)})")
+            if sells.empty:
+                st.write("No OTT sell signals with these settings.")
+            else:
+                st.dataframe(_fmt(sells), use_container_width=True, hide_index=True)
+                st.download_button(
+                    "Download OTT Sell list (CSV)", _fmt(sells).to_csv(index=False),
+                    file_name=f"ott_sell_{scanned_tf_key}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+                )
+
+            with st.expander(f"No recent signal ({len(no_signal)})"):
+                st.dataframe(_fmt(no_signal) if not no_signal.empty else pd.DataFrame(),
+                             use_container_width=True, hide_index=True)
+
+            with st.expander(f"Insufficient history ({len(no_hist)})"):
+                st.dataframe(no_hist[["Symbol", "AsOf"]] if not no_hist.empty else pd.DataFrame(),
+                             use_container_width=True, hide_index=True)
+
         else:
             st.caption(
                 "Heuristic, rule-based pattern detection — treat these as candidates to confirm "
@@ -843,6 +996,10 @@ with tab_stock_chart:
             elif scan_mode.startswith("Golden Cross"):
                 row = scan_symbol_cross(searched_symbol, segment, timeframe, ma_type, lookback or 5,
                                          force_refresh=force_refresh_prices)
+            elif scan_mode.startswith("OTT"):
+                row = scan_symbol_ott(searched_symbol, segment, timeframe, int(ott_length), float(ott_percent),
+                                       ott_ma_type, ott_signal_type, int(ott_lookback),
+                                       force_refresh=force_refresh_prices, source=ott_source)
             elif is_pattern_mode:
                 row = scan_symbol_pattern(searched_symbol, segment, timeframe, pattern_types or [],
                                            pattern_lookback or 80, pole_min_move_pct or 8.0,

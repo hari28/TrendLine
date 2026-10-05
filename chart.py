@@ -14,7 +14,7 @@ from plotly.subplots import make_subplots
 
 from indicators import sma, ema
 from structure import analyze_structure
-from ott import calc_ott, crossover, crossunder
+from ott import calc_ott, crossover, crossunder, get_source
 
 _MA_COLORS = {10: "#FFA500", 20: "#008000", 50: "#FF0000", 200: "#000000"}  # orange, green, red, black
 
@@ -208,20 +208,21 @@ def add_ott_overlay(fig, full_frame: pd.DataFrame, display_bars: int, length: in
                      ma_type: str = "VAR", show_support: bool = True, highlighting: bool = True,
                      highlight_color_changes: bool = False, show_signals_support: bool = True,
                      show_signals_price: bool = False, show_signals_color_change: bool = False,
-                     row: int = 1, col: int = 1):
+                     row: int = 1, col: int = 1, source: str = "Close", show_ott: bool = True):
     """Adds Anil Ozeksi's Optimized Trend Tracker (OTT) to an existing candlestick figure
     (e.g. from build_ma_overlay_chart) -- ported 1:1 from the original Pine Script v4 source,
     including its default look: a blue "Support Line" (the underlying MA), a purple OTT trend
     line, a green/red fill between price and the OTT line, and Buy/Sell labels where the
     Support Line crosses the OTT line. full_frame must be the COMPLETE OHLC history so the
     stop levels/crossovers are accurate from the first displayed bar."""
-    ott_full = calc_ott(full_frame, length=length, percent=percent, ma_type=ma_type)
+    ott_full = calc_ott(full_frame, length=length, percent=percent, ma_type=ma_type, source=source)
+    src_full = get_source(full_frame, source)
     ohlc4_full = (full_frame["Open"] + full_frame["High"] + full_frame["Low"] + full_frame["Close"]) / 4
 
     buy_support_full = crossover(ott_full["MAvg"], ott_full["OTT"])
     sell_support_full = crossunder(ott_full["MAvg"], ott_full["OTT"])
-    buy_price_full = crossover(full_frame["Close"], ott_full["OTT"])
-    sell_price_full = crossunder(full_frame["Close"], ott_full["OTT"])
+    buy_price_full = crossover(src_full, ott_full["OTT"])
+    sell_price_full = crossunder(src_full, ott_full["OTT"])
     buy_color_full = crossover(ott_full["OTT"], ott_full["OTT"].shift(1))
     sell_color_full = crossunder(ott_full["OTT"], ott_full["OTT"].shift(1))
 
@@ -232,7 +233,8 @@ def add_ott_overlay(fig, full_frame: pd.DataFrame, display_bars: int, length: in
     if show_support:
         fig.add_trace(
             go.Scatter(x=frame.index, y=ott["MAvg"], mode="lines", name="OTT Support",
-                       line=dict(width=2, color="#0585E1")),
+                       line=dict(width=2, color="#0585E1"),
+                       hovertemplate="OTT Support: %{y:.2f}<extra></extra>"),
             row=row, col=col,
         )
 
@@ -246,16 +248,20 @@ def add_ott_overlay(fig, full_frame: pd.DataFrame, display_bars: int, length: in
                                       fill="tonexty", fillcolor=fillcolor, showlegend=False,
                                       hoverinfo="skip"), row=row, col=col)
 
-    if highlight_color_changes:
-        up_line = ott["OTT"].where(ott["trend_up"])
-        down_line = ott["OTT"].where(~ott["trend_up"])
-        fig.add_trace(go.Scatter(x=frame.index, y=up_line, mode="lines", name="OTT",
-                                  line=dict(width=2, color="#00A800")), row=row, col=col)
-        fig.add_trace(go.Scatter(x=frame.index, y=down_line, mode="lines", name="OTT",
-                                  line=dict(width=2, color="#FF0000"), showlegend=False), row=row, col=col)
-    else:
-        fig.add_trace(go.Scatter(x=frame.index, y=ott["OTT"], mode="lines", name="OTT",
-                                  line=dict(width=2, color="#B800D9")), row=row, col=col)
+    if show_ott:
+        if highlight_color_changes:
+            up_line = ott["OTT"].where(ott["trend_up"])
+            down_line = ott["OTT"].where(~ott["trend_up"])
+            fig.add_trace(go.Scatter(x=frame.index, y=up_line, mode="lines", name="OTT",
+                                      line=dict(width=2, color="#00A800"),
+                                      hovertemplate="OTT: %{y:.2f}<extra></extra>"), row=row, col=col)
+            fig.add_trace(go.Scatter(x=frame.index, y=down_line, mode="lines", name="OTT",
+                                      line=dict(width=2, color="#FF0000"), showlegend=False,
+                                      hovertemplate="OTT: %{y:.2f}<extra></extra>"), row=row, col=col)
+        else:
+            fig.add_trace(go.Scatter(x=frame.index, y=ott["OTT"], mode="lines", name="OTT",
+                                      line=dict(width=2, color="#B800D9"),
+                                      hovertemplate="OTT: %{y:.2f}<extra></extra>"), row=row, col=col)
 
     if show_signals_support:
         _add_signal_markers(fig, frame, ott["OTT"], buy_support_full.tail(display_bars),

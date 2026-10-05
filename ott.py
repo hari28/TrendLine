@@ -16,6 +16,14 @@ import pandas as pd
 from indicators import sma, ema
 
 MA_TYPES = ["VAR", "SMA", "EMA", "WMA", "TMA", "WWMA", "ZLEMA", "TSF"]
+SOURCES = ["Close", "Open", "High", "Low", "HL2", "HLC3", "OHLC4", "HLCC4"]
+
+
+def get_source(frame: pd.DataFrame, source: str = "Close") -> pd.Series:
+    """TradingView-style price source selector (the Pine `input(close, "Source")`)."""
+    o, h, l, c = frame["Open"], frame["High"], frame["Low"], frame["Close"]
+    return {"Open": o, "High": h, "Low": l, "HL2": (h + l) / 2, "HLC3": (h + l + c) / 3,
+            "OHLC4": (o + h + l + c) / 4, "HLCC4": (h + l + c + c) / 4}.get(source, c)
 
 
 def _wma(src: pd.Series, length: int) -> pd.Series:
@@ -73,9 +81,16 @@ def _linreg_endpoint(src: pd.Series, length: int) -> pd.Series:
 
 
 def _tsf(src: pd.Series, length: int) -> pd.Series:
-    lrc = _linreg_endpoint(src, length)
-    lrs = lrc - lrc.shift(1)
-    return lrc + lrs
+    """Time Series Forecast: linreg(src, length, 0) + (linreg(.., 0) - linreg(.., 1)).
+    Pine's offset-1 value is the same window's line one bar back, so the difference is
+    the regression slope (not the change in endpoint between consecutive bars)."""
+    x = np.arange(length, dtype=float)
+
+    def _fit(window):
+        slope, intercept = np.polyfit(x, window, 1)
+        return intercept + slope * (length - 1) + slope
+
+    return src.rolling(length).apply(_fit, raw=True)
 
 
 def get_ma(src: pd.Series, length: int, ma_type: str) -> pd.Series:
@@ -97,7 +112,7 @@ def get_ma(src: pd.Series, length: int, ma_type: str) -> pd.Series:
 
 
 def calc_ott(full_frame: pd.DataFrame, length: int = 2, percent: float = 1.4,
-             ma_type: str = "VAR") -> pd.DataFrame:
+             ma_type: str = "VAR", source: str = "Close") -> pd.DataFrame:
     """full_frame: complete OHLC history (DatetimeIndex), so the MA/stop levels are
     accurate from the first displayed bar. Returns a frame aligned to full_frame.index:
       MAvg     -- the underlying moving average ("Support Line" in the original script)
@@ -106,7 +121,7 @@ def calc_ott(full_frame: pd.DataFrame, length: int = 2, percent: float = 1.4,
       trend_up -- OTT[2] > OTT[3], i.e. this OTT value rose vs. the previous bar's --
                   the script's own color-change condition
     """
-    src = full_frame["Close"]
+    src = get_source(full_frame, source)
     ma = get_ma(src, length, ma_type)
     fark = ma * percent * 0.01
 

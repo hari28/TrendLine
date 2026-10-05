@@ -9,6 +9,7 @@ import pandas as pd
 from indicators import sma, ema, rsi, build_frame, TIMEFRAMES
 from data_fetcher import fetch_daily_history, fetch_intraday_history
 from patterns import detect_triangle, detect_channel, detect_flag_pole
+from ott import calc_ott, crossover, crossunder, get_source
 
 PERIOD = 200
 FAST_PERIOD = 50
@@ -19,10 +20,20 @@ def _ma(close: pd.Series, ma_type: str, period: int) -> pd.Series:
     return ema(close, period) if ma_type == "EMA" else sma(close, period)
 
 
+def drop_placeholder_bars(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Yahoo fills exchange holidays with a flat, zero-volume candle (O=H=L=C) that real
+    charting platforms (TradingView) don't have. Left in, it shifts every recursive indicator
+    (OTT/VAR, EMA...) by a bar. Requiring High==Low too keeps index symbols, whose volume is
+    always 0 but whose candles have a real range."""
+    if df is None or df.empty or "Volume" not in df.columns:
+        return df
+    return df[~((df["Volume"] == 0) & (df["High"] == df["Low"]))]
+
+
 def load_frame(symbol: str, timeframe: str, force_refresh: bool = False) -> pd.DataFrame | None:
     spec = TIMEFRAMES[timeframe]
     if spec["kind"] == "daily":
-        base = fetch_daily_history(symbol, force_refresh=force_refresh)
+        base = drop_placeholder_bars(fetch_daily_history(symbol, force_refresh=force_refresh))
     else:
         base = fetch_intraday_history(symbol, interval=spec["fetch_interval"], force_refresh=force_refresh)
     frame = build_frame(timeframe, base)
@@ -136,31 +147,46 @@ def apply_band_below(df: pd.DataFrame, band_low: float, band_high: float) -> pd.
 # Mode 2: golden cross / death cross (50 MA vs 200 MA)
 # ---------------------------------------------------------------------------
 
-def _cross_type(close: pd.Series, ma_type: str, lookback: int) -> tuple[str, float, float]:
-    """Return (cross_type, fast_value, slow_value). cross_type is one of
-    'Golden Cross', 'Death Cross', 'No recent cross', or 'Insufficient history'."""
+def _cross_type(close: pd.Series, ma_type: str, lookback: int) -> dict:
+    """Finds the MOST RECENT 50/200 crossover for this stock (whenever it happened) and
+    classifies it against the `lookback` window. Returns a dict:
+      cross_type  -- 'Golden Cross' / 'Death Cross' (that latest cross fell within the last
+                     `lookback` bars), 'No recent cross' (it was older than that, or the MAs have
+                     never crossed in the available history), or 'Insufficient history'
+      fast, slow  -- latest 50 / 200 MA values
+      last_cross  -- 'Golden' / 'Death' / None: direction of the latest cross, however old
+      cross_date  -- timestamp of the bar where that cross happened (NaT if none)
+      bars_ago    -- bars between that cross and the latest bar (NaN if none); 0 = crossed on the
+                     latest bar
+    A golden cross means fast went from <= slow to > slow; a death cross the reverse. Since only the
+    latest cross is considered, a cross that has since reversed is never reported as current."""
+    empty = {"cross_type": "Insufficient history", "fast": float("nan"), "slow": float("nan"),
+             "last_cross": None, "cross_date": pd.NaT, "bars_ago": float("nan")}
     if len(close) < SLOW_PERIOD:
-        return "Insufficient history", float("nan"), float("nan")
+        return empty
 
     fast = _ma(close, ma_type, FAST_PERIOD)
     slow = _ma(close, ma_type, SLOW_PERIOD)
     diff = (fast - slow).dropna()
     if diff.empty:
-        return "Insufficient history", float("nan"), float("nan")
+        return empty
 
-    fast_val, slow_val = fast.iloc[-1], slow.iloc[-1]
-    window = diff.iloc[-(lookback + 1):] if len(diff) > lookback else diff
-    vals = window.values
+    prev = diff.shift(1)
+    golden = (prev <= 0) & (diff > 0)
+    death = (prev >= 0) & (diff < 0)
+    events = diff.index[golden | death]
 
-    golden_event = any(vals[i - 1] <= 0 and vals[i] > 0 for i in range(1, len(vals)))
-    death_event = any(vals[i - 1] >= 0 and vals[i] < 0 for i in range(1, len(vals)))
-    currently_bullish = fast_val > slow_val
+    out = {**empty, "cross_type": "No recent cross", "fast": fast.iloc[-1], "slow": slow.iloc[-1]}
+    if len(events) == 0:
+        return out
 
-    if golden_event and currently_bullish:
-        return "Golden Cross", fast_val, slow_val
-    if death_event and not currently_bullish:
-        return "Death Cross", fast_val, slow_val
-    return "No recent cross", fast_val, slow_val
+    last_ts = events[-1]
+    bars_ago = len(diff) - 1 - diff.index.get_loc(last_ts)
+    is_golden = bool(golden.loc[last_ts])
+    out.update(last_cross="Golden" if is_golden else "Death", cross_date=last_ts, bars_ago=bars_ago)
+    if bars_ago < lookback:  # "within the last N bars", same window the old any()-scan used
+        out["cross_type"] = "Golden Cross" if is_golden else "Death Cross"
+    return out
 
 
 def scan_symbol_cross(symbol: str, segment: str, timeframe: str, ma_type: str, lookback: int,
@@ -170,7 +196,7 @@ def scan_symbol_cross(symbol: str, segment: str, timeframe: str, ma_type: str, l
         return None
 
     close = frame["Close"]
-    cross_type, fast_val, slow_val = _cross_type(close, ma_type, lookback)
+    info = _cross_type(close, ma_type, lookback)
 
     return {
         "Symbol": symbol,
@@ -178,9 +204,12 @@ def scan_symbol_cross(symbol: str, segment: str, timeframe: str, ma_type: str, l
         "Close": close.iloc[-1],
         "AsOf": frame.index[-1],
         "Volume": frame["Volume"].iloc[-1],
-        f"{ma_type}50": fast_val,
-        f"{ma_type}200": slow_val,
-        "CrossType": cross_type,
+        f"{ma_type}50": info["fast"],
+        f"{ma_type}200": info["slow"],
+        "CrossType": info["cross_type"],
+        "LastCross": info["last_cross"],
+        "CrossDate": info["cross_date"],
+        "BarsSinceCross": info["bars_ago"],
         "BarsAvailable": len(close),
     }
 
@@ -455,6 +484,73 @@ def scan_universe_aged_ath(symbols: pd.DataFrame, timeframe: str, min_age_years:
             progress_cb(i, total, r.Symbol)
         result = scan_symbol_aged_ath(r.Symbol, r.Segment, timeframe, min_age_years,
                                        min_confirm_bars=min_confirm_bars, force_refresh=force_refresh)
+        if result:
+            rows.append(result)
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Mode 7: Optimized Trend Tracker (OTT) signals -- flags stocks where the
+# chosen OTT signal (see ott.py / the original Pine Script's three signal
+# families) fired within the last N bars. Buy/Sell here mean the same thing
+# as the "Buy"/"Sell" labels the Pine indicator draws on the chart.
+# ---------------------------------------------------------------------------
+
+OTT_SIGNAL_TYPES = ["Support Line crosses OTT", "Price crosses OTT", "OTT colour change"]
+
+
+def _ott_signal_masks(ott_df: pd.DataFrame, close: pd.Series, signal_type: str) -> tuple[pd.Series, pd.Series]:
+    ma, ott = ott_df["MAvg"], ott_df["OTT"]
+    if signal_type == "Price crosses OTT":
+        return crossover(close, ott), crossunder(close, ott)
+    if signal_type == "OTT colour change":
+        prev = ott.shift(1)  # OTT is already shifted 2 bars, so this is the Pine's OTT[2] vs OTT[3]
+        return crossover(ott, prev), crossunder(ott, prev)
+    return crossover(ma, ott), crossunder(ma, ott)  # default: "Support Line" (MAvg) vs OTT
+
+
+def scan_symbol_ott(symbol: str, segment: str, timeframe: str, length: int, percent: float, ott_ma_type: str,
+                     signal_type: str, lookback: int, force_refresh: bool = False,
+                     source: str = "Close") -> dict | None:
+    frame = load_frame(symbol, timeframe, force_refresh=force_refresh)
+    if frame is None or len(frame) < max(30, length + 10):
+        return None
+
+    close = frame["Close"]
+    ott_df = calc_ott(frame, length=length, percent=percent, ma_type=ott_ma_type, source=source)
+    ott_last = ott_df["OTT"].iloc[-1]
+    base = {"Symbol": symbol, "Segment": segment, "Close": close.iloc[-1], "AsOf": frame.index[-1],
+            "Volume": frame["Volume"].iloc[-1], "OTT": ott_last, "SupportLine": ott_df["MAvg"].iloc[-1]}
+    if pd.isna(ott_last):
+        return {**base, "Signal": "Insufficient history", "BarsAgo": float("nan"), "Trend": ""}
+
+    buy, sell = _ott_signal_masks(ott_df, get_source(frame, source), signal_type)
+    buy_pos = [i for i in range(max(0, len(frame) - lookback), len(frame)) if buy.iloc[i]]
+    sell_pos = [i for i in range(max(0, len(frame) - lookback), len(frame)) if sell.iloc[i]]
+    last_buy = buy_pos[-1] if buy_pos else -1
+    last_sell = sell_pos[-1] if sell_pos else -1
+
+    if last_buy < 0 and last_sell < 0:
+        signal, bars_ago = "No recent signal", float("nan")
+    elif last_buy > last_sell:
+        signal, bars_ago = "Buy", len(frame) - 1 - last_buy
+    else:
+        signal, bars_ago = "Sell", len(frame) - 1 - last_sell
+
+    trend = "Bullish" if ott_df["MAvg"].iloc[-1] > ott_last else "Bearish"
+    return {**base, "Signal": signal, "BarsAgo": bars_ago, "Trend": trend}
+
+
+def scan_universe_ott(symbols: pd.DataFrame, timeframe: str, length: int, percent: float, ott_ma_type: str,
+                       signal_type: str, lookback: int, progress_cb=None,
+                       force_refresh: bool = False, source: str = "Close") -> pd.DataFrame:
+    rows = []
+    total = len(symbols)
+    for i, r in enumerate(symbols.itertuples(index=False)):
+        if progress_cb:
+            progress_cb(i, total, r.Symbol)
+        result = scan_symbol_ott(r.Symbol, r.Segment, timeframe, length, percent, ott_ma_type, signal_type,
+                                  lookback, force_refresh=force_refresh, source=source)
         if result:
             rows.append(result)
     return pd.DataFrame(rows)

@@ -1,0 +1,14 @@
+{
+  "source": "Close",
+  "length": 7,
+  "percent": 0.72,
+  "ma_type": "VAR",
+  "show_support": true,
+  "show_signals_support": true,
+  "show_signals_price": false,
+  "highlight_color_changes": false,
+  "show_signals_color_change": false,
+  "highlighting": false,
+  "show_ott": true,
+  "show_signals": false
+}
