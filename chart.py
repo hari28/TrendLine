@@ -239,8 +239,9 @@ def add_ott_overlay(fig, full_frame: pd.DataFrame, display_bars: int, length: in
         )
 
     if highlighting:
-        up_ott = ott["OTT"].where(ott["MAvg"] > ott["OTT"])
-        down_ott = ott["OTT"].where(ott["MAvg"] < ott["OTT"])
+        # Pine: fill(ohlc4, OTT[2]) coloured by MAvg vs the *unshifted* OTT
+        up_ott = ott["OTT"].where(ott["MAvg"] > ott["OTT_raw"])
+        down_ott = ott["OTT"].where(ott["MAvg"] < ott["OTT_raw"])
         for band, fillcolor in ((up_ott, "rgba(0,128,0,0.15)"), (down_ott, "rgba(255,0,0,0.15)")):
             fig.add_trace(go.Scatter(x=frame.index, y=ohlc4, mode="lines", line=dict(width=0),
                                       showlegend=False, hoverinfo="skip"), row=row, col=col)
@@ -264,13 +265,13 @@ def add_ott_overlay(fig, full_frame: pd.DataFrame, display_bars: int, length: in
                                       hovertemplate="OTT: %{y:.2f}<extra></extra>"), row=row, col=col)
 
     if show_signals_support:
-        _add_signal_markers(fig, frame, ott["OTT"], buy_support_full.tail(display_bars),
+        _add_signal_markers(fig, frame, ott["OTT_raw"], buy_support_full.tail(display_bars),
                              sell_support_full.tail(display_bars), row, col)
     if show_signals_price:
-        _add_signal_markers(fig, frame, ott["OTT"], buy_price_full.tail(display_bars),
+        _add_signal_markers(fig, frame, ott["OTT_raw"], buy_price_full.tail(display_bars),
                              sell_price_full.tail(display_bars), row, col)
     if show_signals_color_change:
-        _add_signal_markers(fig, frame, ott["OTT"], buy_color_full.tail(display_bars),
+        _add_signal_markers(fig, frame, ott["OTT_raw"], buy_color_full.tail(display_bars),
                              sell_color_full.tail(display_bars), row, col)
 
     return fig

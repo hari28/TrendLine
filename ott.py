@@ -42,9 +42,11 @@ def _tma(src: pd.Series, length: int) -> pd.Series:
 def _var_ma(src: pd.Series, length: int) -> pd.Series:
     """Pine's VAR (Chande VIDYA-style, CMO-weighted EMA) -- the script's default MA."""
     valpha = 2 / (length + 1)
-    delta = src.diff()
-    vud = delta.clip(lower=0).rolling(9, min_periods=1).sum()
-    vdd = (-delta.clip(upper=0)).rolling(9, min_periods=1).sum()
+    # Pine: vud1/vdd1 are 0 on the first bar (src[1] is na), and sum(x, 9) is na until 9 bars
+    # exist -- so vCMO = nz(na) = 0 and VAR stays at 0 for the first 8 bars.
+    delta = src.diff().fillna(0.0)
+    vud = delta.clip(lower=0).rolling(9, min_periods=9).sum()
+    vdd = (-delta.clip(upper=0)).rolling(9, min_periods=9).sum()
     vcmo = ((vud - vdd) / (vud + vdd)).fillna(0.0)
 
     s = src.to_numpy()
@@ -118,6 +120,8 @@ def calc_ott(full_frame: pd.DataFrame, length: int = 2, percent: float = 1.4,
       MAvg     -- the underlying moving average ("Support Line" in the original script)
       OTT      -- the OTT trend line, already shifted 2 bars (the script's `OTT[2]`
                   plotting convention)
+      OTT_raw  -- the unshifted OTT (Pine's bare `OTT`), which the script uses for the
+                  highlighter colour (MAvg > OTT) and the Buy/Sell label positions
       trend_up -- OTT[2] > OTT[3], i.e. this OTT value rose vs. the previous bar's --
                   the script's own color-change condition
     """
@@ -154,7 +158,8 @@ def calc_ott(full_frame: pd.DataFrame, length: int = 2, percent: float = 1.4,
     ott_raw = np.where(ma_v > mt, mt * (200 + percent) / 200, mt * (200 - percent) / 200)
     ott = pd.Series(ott_raw, index=full_frame.index).shift(2)
 
-    out = pd.DataFrame({"MAvg": ma, "OTT": ott}, index=full_frame.index)
+    out = pd.DataFrame({"MAvg": ma, "OTT": ott,
+                        "OTT_raw": pd.Series(ott_raw, index=full_frame.index)}, index=full_frame.index)
     out["trend_up"] = out["OTT"] > out["OTT"].shift(1)
     return out
 
