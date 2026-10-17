@@ -76,7 +76,20 @@ UNIVERSE_OPTIONS = UNIVERSES + [ALL_UNIVERSE_LABEL, INDEX_UNIVERSE_LABEL]
 
 def _fmt_asof(series: pd.Series, timeframe: str) -> pd.Series:
     fmt = "%Y-%m-%d %H:%M" if TIMEFRAMES[timeframe]["kind"] == "intraday" else "%Y-%m-%d"
-    return pd.to_datetime(series).dt.strftime(fmt)
+
+    def _one(v) -> str:
+        # Per-value so one bad/odd timestamp (e.g. a stray "9", or tz-aware mixed with naive across
+        # a whole-universe scan) can't take down the table -- it just shows blank.
+        if v is None or isinstance(v, (int, float)) or (isinstance(v, str) and not v.strip()[:4].isdigit()):
+            return ""
+        ts = pd.to_datetime(v, errors="coerce")
+        if pd.isna(ts):
+            return ""
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert("Asia/Kolkata").tz_localize(None)
+        return ts.strftime(fmt)
+
+    return pd.Series([_one(v) for v in series], index=series.index, dtype=object)
 
 
 def _current_scan_params(scan_mode, band_low, band_high, lookback, avg_period, spike_multiple,
@@ -1085,24 +1098,30 @@ with tab_ott:
     _seed_ott_tab_defaults()
     _p = f"{OTT_TAB_PREFIX}_ott_"
 
-    oc1, oc2, oc3, oc4 = st.columns([2, 2, 1, 1])
-    with oc1:
-        ott_universe = st.selectbox("Universe", UNIVERSE_OPTIONS, index=0, key="ott_tab_universe")
-    if ott_universe == ALL_UNIVERSE_LABEL:
-        ott_symbols = sorted(all_universe_symbols["Symbol"].unique().tolist())
-    else:
-        ott_symbols = sorted(get_constituents(ott_universe)["Symbol"].tolist())
-    with oc2:
-        _default_idx = ott_symbols.index(searched_symbol) if searched_symbol in ott_symbols else 0
-        ott_symbol = st.selectbox("Symbol", ott_symbols, index=_default_idx, key="ott_tab_symbol")
-    with oc3:
-        ott_tf_label = st.selectbox("Timeframe", TF_LABELS, index=DEFAULT_TF_INDEX, key="ott_tab_tf")
-        ott_tf_key = TF_KEYS[TF_LABELS.index(ott_tf_label)]
-    with oc4:
-        ott_bars = st.number_input("Bars to show", min_value=50, max_value=1000, value=250, step=25,
-                                   key="ott_tab_bars")
+    def _ott_tab_autoscan():
+        st.session_state["ott_tab_autoscan"] = True
 
-    with st.expander("⚙️ Inputs (same as the TradingView indicator)", expanded=True):
+    # --- 1. What to screen: timeframe + bars. Changing either re-screens every universe. ---
+    oc1, oc2, oc3, oc4 = st.columns([1.2, 1, 1.6, 1.2])
+    with oc1:
+        ott_tf_label = st.selectbox("Timeframe", TF_LABELS, index=DEFAULT_TF_INDEX, key="ott_tab_tf",
+                                    on_change=_ott_tab_autoscan)
+        ott_tf_key = TF_KEYS[TF_LABELS.index(ott_tf_label)]
+    with oc2:
+        ott_bars = st.number_input("Bars to show", min_value=5, max_value=1000, value=250, step=5,
+                                   key="ott_tab_bars", on_change=_ott_tab_autoscan,
+                                   help="Signals that fired within these last N bars count as hits. "
+                                        "Also the number of bars drawn on the chart below.")
+    with oc3:
+        ott_scan_signal = st.selectbox("Signal", OTT_SIGNAL_TYPES, index=0, key="ott_tab_scan_signal",
+                                       on_change=_ott_tab_autoscan)
+    with oc4:
+        st.write("")
+        st.write("")
+        run_clicked = st.button("🔎 Screen all universes", type="primary", key="ott_tab_scan_run",
+                                use_container_width=True)
+
+    with st.expander("⚙️ Inputs (same as the TradingView indicator)", expanded=False):
         ic1, ic2, ic3 = st.columns(3)
         with ic1:
             o_source, o_length, o_percent, o_ma_type = _ott_core_inputs(OTT_TAB_PREFIX)
@@ -1118,14 +1137,92 @@ with tab_ott:
         ob1.button("Defaults", key="ott_tab_reset", on_click=_reset_ott_tab)
         ob2.button("💾 Save settings", key="ott_tab_save", on_click=_save_ott, args=(OTT_TAB_PREFIX, False))
 
-    if st.button(f"📈 Load OTT for {ott_symbol}", type="primary", key="ott_tab_load"):
-        st.session_state["ott_tab_shown"] = (ott_symbol, ott_tf_key, ott_tf_label)
+    scan_params = (ott_tf_key, int(ott_bars), ott_scan_signal, o_source, o_length, o_percent, o_ma_type)
+    n_universe = len(all_universe_symbols)
+    st.caption(f"Screens every available universe — Large, Mid, Small Cap and Indices ({n_universe} symbols, "
+               f"de-duplicated) — on the selected timeframe. A hit = the chosen signal fired within the last "
+               f"{int(ott_bars)} bars. Changing Timeframe, Bars or Signal re-screens automatically.")
+
+    # --- 2. Screen ---
+    if run_clicked or st.session_state.pop("ott_tab_autoscan", False):
+        prog = st.progress(0.0)
+        stat = st.empty()
+
+        def _ott_cb(i, total, symbol):
+            prog.progress((i + 1) / total)
+            stat.text(f"[{i+1}/{total}] {symbol}")
+
+        res = scan_universe_ott(all_universe_symbols[["Symbol", "Segment"]], ott_tf_key, o_length, o_percent,
+                                o_ma_type, ott_scan_signal, int(ott_bars), progress_cb=_ott_cb,
+                                force_refresh=force_refresh_prices, source=o_source)
+        prog.empty()
+        stat.empty()
+        st.session_state["ott_tab_scan"] = (res, scan_params, ott_tf_label, n_universe)
 
     ott_tab_records = []
-    ott_tab_shown = st.session_state.get("ott_tab_shown")
-    if not ott_tab_shown:
-        st.info("Pick a symbol and timeframe, then click **Load OTT**.")
+    ott_tab_shown = None
+    ott_scan = st.session_state.get("ott_tab_scan")
+    if ott_scan is None:
+        st.info("Pick a **Timeframe** and **Bars to show** (or click **Screen all universes**) to scan.")
     else:
+        res, res_params, res_tf_label, res_total = ott_scan
+        res_tf = res_params[0]
+        if res_params != scan_params:
+            st.warning("Settings changed since this scan — click **Screen all universes** to refresh.")
+        if res is None or res.empty:
+            st.caption("No usable data for any symbol on this timeframe.")
+        else:
+            hits = res[res["Signal"].isin(["Buy", "Sell"])]
+            n_buy, n_sell = int((hits["Signal"] == "Buy").sum()), int((hits["Signal"] == "Sell").sum())
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("Scanned", f"{len(res)}/{res_total}")
+            s2.metric("🟢 Buy", n_buy)
+            s3.metric("🔴 Sell", n_sell)
+            s4.metric("Uptrend now", int((res["Trend"] == "Bullish").sum()))
+
+            f1, f2, f3 = st.columns([2, 2, 2])
+            with f1:
+                show_sig = st.radio("Show", ["Buy", "Sell", "Buy + Sell", "All"], index=2, horizontal=True,
+                                    key="ott_tab_show_sig")
+            with f2:
+                seg_opts = sorted(res["Segment"].dropna().unique().tolist())
+                seg_pick = st.multiselect("Universe", seg_opts, default=seg_opts, key="ott_tab_seg_filter")
+            with f3:
+                max_ago = st.slider("Fired within last N bars", 0, int(res_params[1]), int(res_params[1]),
+                                    key="ott_tab_max_ago")
+
+            view = res[res["Segment"].isin(seg_pick)].copy()
+            if show_sig == "Buy":
+                view = view[view["Signal"] == "Buy"]
+            elif show_sig == "Sell":
+                view = view[view["Signal"] == "Sell"]
+            elif show_sig == "Buy + Sell":
+                view = view[view["Signal"].isin(["Buy", "Sell"])]
+            if show_sig != "All":
+                view = view[view["BarsAgo"] <= max_ago]
+            view["AsOf"] = _fmt_asof(view["AsOf"], res_tf)
+            for col in ("Close", "OTT", "SupportLine"):
+                view[col] = view[col].round(2)
+            view["Dist from OTT %"] = ((view["Close"] - view["OTT"]) / view["OTT"] * 100).round(2)
+            view = view.sort_values(["BarsAgo", "Signal", "Symbol"], na_position="last")
+            cols = ["Symbol", "Segment", "Signal", "BarsAgo", "Trend", "Close", "SupportLine", "OTT",
+                    "Dist from OTT %", "Volume", "AsOf"]
+            st.markdown(f"**{len(view)} result(s)** — {res_tf_label}, {res_params[2]}")
+            st.dataframe(view[[c for c in cols if c in view.columns]], use_container_width=True,
+                         hide_index=True)
+            ott_tab_records = [
+                {"Symbol": r.Symbol, "Signal": r.Signal, "Bars ago": int(r.BarsAgo) if pd.notna(r.BarsAgo) else "",
+                 "Close": r.Close, "OTT": r.OTT}
+                for r in view.head(40).itertuples()
+            ]
+
+            # --- 3. Drill into one stock from the results ---
+            st.divider()
+            pick_list = view["Symbol"].tolist() or sorted(res["Symbol"].tolist())
+            ott_symbol = st.selectbox("📈 Chart a stock from the results", pick_list, key="ott_tab_symbol")
+            ott_tab_shown = (ott_symbol, res_tf, res_tf_label)
+
+    if ott_tab_shown:
         o_sym, o_tf_key, o_tf_label = ott_tab_shown
         with st.spinner(f"Fetching {o_sym}..."):
             o_full = load_frame(o_sym, o_tf_key, force_refresh=force_refresh_prices)
@@ -1172,13 +1269,6 @@ with tab_ott:
                 m5.metric("Last signal", last_sig, f"{bars_ago} bar(s) ago" if bars_ago is not None else None,
                           delta_color="off")
 
-                ott_tab_records.append({
-                    "Symbol": o_sym, "Timeframe": o_tf_label, "Close": round(float(o_close.iloc[-1]), 2),
-                    "Support": round(float(last["MAvg"]), 2), "OTT": round(float(last["OTT"]), 2),
-                    "Trend": "Up" if last["MAvg"] > last["OTT"] else "Down",
-                    "Last signal": last_sig + (f" ({bars_ago} bars ago)" if bars_ago is not None else ""),
-                })
-
             fig = build_ma_overlay_chart(o_full, o_sym, o_tf_label, None, periods=(),
                                           display_bars=int(ott_bars))
             add_ott_overlay(fig, o_full, display_bars=int(ott_bars), source=o_source, length=o_length,
@@ -1190,104 +1280,53 @@ with tab_ott:
                                     f"{o_source})")
             st.plotly_chart(fig, use_container_width=True, key="ott_tab_fig", config=PLOTLY_CONFIG)
 
-            st.subheader("🔔 Alerts (the script's alertconditions)")
-            alert_rows = []
-            for name, msg, mask in alert_defs:
-                hits = mask[mask.fillna(False)].index
-                last_hit = hits.max() if len(hits) else None
-                alert_rows.append({
-                    "Alert": name, "Message": msg,
-                    "On latest bar": "✅ Fired" if bool(mask.iloc[-1]) else "—",
-                    "Last fired": (_fmt_asof(pd.Series([last_hit]), o_tf_key).iloc[0] if last_hit is not None
-                                   else "Never"),
-                    "Bars ago": (len(o_full) - 1 - o_full.index.get_loc(last_hit)) if last_hit is not None
-                                else None,
-                })
-            st.dataframe(pd.DataFrame(alert_rows), use_container_width=True, hide_index=True)
+            with st.expander("🔔 Alerts and 📜 signal history for this stock"):
+                alert_rows = []
+                for name, msg, mask in alert_defs:
+                    hit_idx = mask[mask.fillna(False)].index
+                    last_hit = hit_idx.max() if len(hit_idx) else None
+                    alert_rows.append({
+                        "Alert": name, "Message": msg,
+                        "On latest bar": "✅ Fired" if bool(mask.iloc[-1]) else "—",
+                        "Last fired": (_fmt_asof(pd.Series([last_hit]), o_tf_key).iloc[0] if last_hit is not None
+                                       else "Never"),
+                        "Bars ago": (len(o_full) - 1 - o_full.index.get_loc(last_hit)) if last_hit is not None
+                                    else None,
+                    })
+                st.dataframe(pd.DataFrame(alert_rows), use_container_width=True, hide_index=True)
 
-            st.subheader("📜 Signal history (bars shown on chart)")
-            sig_kind = st.radio("Signal type", ["Support Line crosses OTT", "Price crosses OTT",
-                                                "OTT colour change"], horizontal=True, key="ott_tab_sig_kind")
-            kind_idx = {"OTT colour change": 0, "Support Line crosses OTT": 2, "Price crosses OTT": 4}[sig_kind]
-            buy_m, sell_m = alert_defs[kind_idx][2], alert_defs[kind_idx + 1][2]
-            window = o_full.index[-int(ott_bars):]
-            hist = []
-            for side, mask in (("Buy", buy_m), ("Sell", sell_m)):
-                for ts in mask[mask.fillna(False)].index.intersection(window):
-                    hist.append({"Date": ts, "Signal": side, "Close": round(float(o_close.loc[ts]), 2),
-                                 "Support": round(float(o_df.at[ts, "MAvg"]), 2),
-                                 "OTT": round(float(o_df.at[ts, "OTT"]), 2)})
-            if not hist:
-                st.caption("No signals of this type in the bars shown.")
-            else:
-                hist_df = pd.DataFrame(hist).sort_values("Date", ascending=False).reset_index(drop=True)
-                # Move from each signal to the next opposite one (or to the latest close if still open)
-                hist_df["Move % (to next signal / now)"] = None
-                asc = hist_df.sort_values("Date").reset_index(drop=True)
-                moves = []
-                for i, r in asc.iterrows():
-                    exit_px = asc.loc[i + 1, "Close"] if i + 1 < len(asc) else float(o_close.iloc[-1])
-                    chg = (exit_px - r["Close"]) / r["Close"] * 100
-                    moves.append(round(chg if r["Signal"] == "Buy" else -chg, 2))
-                asc["Move % (to next signal / now)"] = moves
-                hist_df = asc.sort_values("Date", ascending=False).reset_index(drop=True)
-                hist_df["Date"] = _fmt_asof(hist_df["Date"], o_tf_key)
-                st.dataframe(hist_df, use_container_width=True, hide_index=True)
-                st.caption("Move % = gain of each signal held until the next opposite signal (Sell moves are "
-                           "shown as short gains). No costs or slippage. A rough read on how well these "
-                           "settings fit this stock, not a backtest.")
-
-    st.divider()
-    st.subheader("🔎 Scan a universe with these OTT inputs")
-    sc1, sc2, sc3 = st.columns([2, 2, 1])
-    with sc1:
-        ott_scan_universe = st.selectbox("Universe to scan", UNIVERSE_OPTIONS, index=0, key="ott_tab_scan_univ")
-    with sc2:
-        ott_scan_signal = st.selectbox("Signal", OTT_SIGNAL_TYPES, index=0, key="ott_tab_scan_signal")
-    with sc3:
-        ott_scan_lookback = st.number_input("Within last N bars", min_value=1, max_value=50, value=3, step=1,
-                                            key="ott_tab_scan_lookback")
-    st.caption(f"Uses this tab's timeframe ({ott_tf_label}) and the Inputs above.")
-    if st.button("Run OTT scan", key="ott_tab_scan_run"):
-        scan_segments = UNIVERSES if ott_scan_universe == ALL_UNIVERSE_LABEL else [ott_scan_universe]
-        scan_df = get_all_symbols(scan_segments, force_refresh=force_refresh_symbols)
-        prog = st.progress(0.0)
-        stat = st.empty()
-
-        def _ott_cb(i, total, symbol):
-            prog.progress((i + 1) / total)
-            stat.text(f"[{i+1}/{total}] {symbol}")
-
-        res = scan_universe_ott(scan_df[["Symbol", "Segment"]], ott_tf_key, o_length, o_percent, o_ma_type,
-                                ott_scan_signal, int(ott_scan_lookback), progress_cb=_ott_cb,
-                                force_refresh=force_refresh_prices, source=o_source)
-        stat.text(f"Done — {len(res)}/{len(scan_df)} symbols had usable data.")
-        st.session_state["ott_tab_scan"] = (res, ott_tf_key)
-
-    ott_scan = st.session_state.get("ott_tab_scan")
-    if ott_scan is not None:
-        res, res_tf = ott_scan
-        if res is None or res.empty:
-            st.caption("No results.")
-        else:
-            only_hits = st.checkbox("Only show stocks with a recent Buy/Sell", value=True, key="ott_tab_only_hits")
-            view = res.copy()
-            if only_hits:
-                view = view[view["Signal"].isin(["Buy", "Sell"])]
-            view["AsOf"] = _fmt_asof(view["AsOf"], res_tf)
-            for col in ("Close", "OTT", "SupportLine"):
-                view[col] = view[col].round(2)
-            view = view.sort_values(["Signal", "BarsAgo", "Symbol"])
-            cols = ["Symbol", "Segment", "Signal", "BarsAgo", "Trend", "Close", "SupportLine", "OTT", "Volume", "AsOf"]
-            st.dataframe(view[[c for c in cols if c in view.columns]], use_container_width=True, hide_index=True)
-            st.caption("Tip: pick any symbol above in the Symbol box at the top of this tab to chart it.")
+                sig_kind = st.radio("Signal type", OTT_SIGNAL_TYPES, horizontal=True, key="ott_tab_sig_kind")
+                kind_idx = {"OTT colour change": 0, "Support Line crosses OTT": 2, "Price crosses OTT": 4}[sig_kind]
+                buy_m, sell_m = alert_defs[kind_idx][2], alert_defs[kind_idx + 1][2]
+                window = o_full.index[-int(ott_bars):]
+                hist = []
+                for side, mask in (("Buy", buy_m), ("Sell", sell_m)):
+                    for ts in mask[mask.fillna(False)].index.intersection(window):
+                        hist.append({"Date": ts, "Signal": side, "Close": round(float(o_close.loc[ts]), 2),
+                                     "Support": round(float(o_df.at[ts, "MAvg"]), 2),
+                                     "OTT": round(float(o_df.at[ts, "OTT"]), 2)})
+                if not hist:
+                    st.caption("No signals of this type in the bars shown.")
+                else:
+                    asc = pd.DataFrame(hist).sort_values("Date").reset_index(drop=True)
+                    moves = []
+                    for i, r in asc.iterrows():
+                        exit_px = asc.loc[i + 1, "Close"] if i + 1 < len(asc) else float(o_close.iloc[-1])
+                        chg = (exit_px - r["Close"]) / r["Close"] * 100
+                        moves.append(round(chg if r["Signal"] == "Buy" else -chg, 2))
+                    asc["Move % (to next signal / now)"] = moves
+                    hist_df = asc.sort_values("Date", ascending=False).reset_index(drop=True)
+                    hist_df["Date"] = _fmt_asof(hist_df["Date"], o_tf_key)
+                    st.dataframe(hist_df, use_container_width=True, hide_index=True)
+                    st.caption("Move % = gain of each signal held until the next opposite signal (Sell moves are "
+                               "shown as short gains). No costs or slippage. A rough read, not a backtest.")
 
     render_telegram_send_button(
         "ott_tab",
         header_lines=[
             f"{datetime.now():%d-%b-%Y %H:%M} IST",
-            f"📈 Optimised Trend Trader — {ott_tab_shown[0] if ott_tab_shown else ''}",
-            f"OTT({o_length}, {o_percent:g}, {o_ma_type}, {o_source}) | {ott_tab_shown[2] if ott_tab_shown else ''}",
+            f"📈 Optimised Trend Trader screen — {ott_tab_shown[2] if ott_tab_shown else ott_tf_label}",
+            f"OTT({o_length}, {o_percent:g}, {o_ma_type}, {o_source}) | {ott_scan_signal} | last {int(ott_bars)} bars",
         ],
         records=ott_tab_records,
     )

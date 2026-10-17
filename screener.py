@@ -37,6 +37,15 @@ def load_frame(symbol: str, timeframe: str, force_refresh: bool = False) -> pd.D
     else:
         base = fetch_intraday_history(symbol, interval=spec["fetch_interval"], force_refresh=force_refresh)
     frame = build_frame(timeframe, base)
+    if frame is not None and not frame.empty and not isinstance(frame.index, pd.DatetimeIndex):
+        # A corrupt/partial cache file can come back with a non-date index (e.g. "9"); keep only
+        # the rows whose index really is a timestamp.
+        idx = pd.to_datetime(frame.index, errors="coerce")
+        frame = frame[~idx.isna()].copy()
+        frame.index = idx[~idx.isna()]
+        if getattr(frame.index, "tz", None) is not None:
+            frame.index = frame.index.tz_localize(None)
+        frame = frame.sort_index()
     if frame is None or frame.empty or len(frame) < 20:
         return None
     return frame
