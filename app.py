@@ -1180,6 +1180,12 @@ with tab_ott:
             s3.metric("🔴 Sell", n_sell)
             s4.metric("Uptrend now", int((res["Trend"] == "Bullish").sum()))
 
+            def _keep_valid(key, options):
+                # Drop stale picks (e.g. after a re-scan on another timeframe) so the
+                # multiselect never holds a value that is no longer in its options.
+                if key in st.session_state:
+                    st.session_state[key] = [v for v in st.session_state[key] if v in options]
+
             f1, f2, f3 = st.columns([2, 2, 2])
             with f1:
                 show_sig = st.radio("Show", ["Buy", "Sell", "Buy + Sell", "All"], index=2, horizontal=True,
@@ -1188,10 +1194,25 @@ with tab_ott:
                 seg_opts = sorted(res["Segment"].dropna().unique().tolist())
                 seg_pick = st.multiselect("Universe", seg_opts, default=seg_opts, key="ott_tab_seg_filter")
             with f3:
+                trend_opts = sorted(t for t in res["Trend"].dropna().unique() if t)
+                _keep_valid("ott_tab_trend_filter", trend_opts)
+                trend_pick = st.multiselect("Trend", trend_opts, default=trend_opts, key="ott_tab_trend_filter")
+
+            f4, f5 = st.columns([3, 3])
+            with f4:
+                bars_opts = sorted(int(b) for b in hits["BarsAgo"].dropna().unique())
+                _keep_valid("ott_tab_bars_filter", bars_opts)
+                bars_pick = st.multiselect("Bars ago (signal fired exactly N bars back)", bars_opts,
+                                           default=[], key="ott_tab_bars_filter",
+                                           placeholder="All bars — pick one or more, e.g. 0, 1, 2")
+            with f5:
                 max_ago = st.slider("Fired within last N bars", 0, int(res_params[1]), int(res_params[1]),
                                     key="ott_tab_max_ago")
 
-            view = res[res["Segment"].isin(seg_pick)].copy()
+            # Rows with no trend (insufficient history) stay visible only while every trend is picked
+            trend_mask = res["Trend"].isin(trend_pick) | (
+                res["Trend"].fillna("").eq("") & (len(trend_pick) == len(trend_opts)))
+            view = res[res["Segment"].isin(seg_pick) & trend_mask].copy()
             if show_sig == "Buy":
                 view = view[view["Signal"] == "Buy"]
             elif show_sig == "Sell":
@@ -1200,6 +1221,8 @@ with tab_ott:
                 view = view[view["Signal"].isin(["Buy", "Sell"])]
             if show_sig != "All":
                 view = view[view["BarsAgo"] <= max_ago]
+            if bars_pick:
+                view = view[view["BarsAgo"].isin(bars_pick)]
             view["AsOf"] = _fmt_asof(view["AsOf"], res_tf)
             for col in ("Close", "OTT", "SupportLine"):
                 view[col] = view[col].round(2)
