@@ -1231,8 +1231,19 @@ with tab_ott:
             cols = ["Symbol", "Segment", "Signal", "BarsAgo", "Trend", "Close", "SupportLine", "OTT",
                     "Dist from OTT %", "Volume", "AsOf"]
             st.markdown(f"**{len(view)} result(s)** — {res_tf_label}, {res_params[2]}")
-            st.dataframe(view[[c for c in cols if c in view.columns]], use_container_width=True,
-                         hide_index=True)
+            show_cols = [c for c in cols if c in view.columns]
+            trend_groups = [("🟢 Bullish", view[view["Trend"] == "Bullish"]),
+                            ("🔴 Bearish", view[view["Trend"] == "Bearish"]),
+                            ("⚪ No trend (insufficient history)",
+                             view[~view["Trend"].isin(["Bullish", "Bearish"])])]
+            for g_label, g_view in trend_groups:
+                if g_label.startswith("⚪") and g_view.empty:
+                    continue
+                st.markdown(f"#### {g_label} — {len(g_view)} result(s)")
+                if g_view.empty:
+                    st.caption("No stocks in this group for the current filters.")
+                else:
+                    st.dataframe(g_view[show_cols], use_container_width=True, hide_index=True)
             ott_tab_records = [
                 {"Symbol": r.Symbol, "Signal": r.Signal, "Bars ago": int(r.BarsAgo) if pd.notna(r.BarsAgo) else "",
                  "Close": r.Close, "OTT": r.OTT}
