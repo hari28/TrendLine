@@ -42,7 +42,9 @@ from screener import (scan_universe, apply_band, apply_band_below, scan_universe
                        OTT_SIGNAL_TYPES)
 from indicators import TIMEFRAMES
 from market_data import get_fii_dii_activity, deals_for_symbols
-from chart import build_candles_with_volume_profile, build_ma_overlay_chart, build_structure_chart, add_ott_overlay
+from chart import (build_candles_with_volume_profile, build_ma_overlay_chart, build_structure_chart, add_ott_overlay,
+                   build_fab4_chart)
+import fab4
 from ott import MA_TYPES as OTT_MA_TYPES, SOURCES as OTT_SOURCES, calc_ott, get_source, crossover, crossunder
 import screener_alert
 import cpr
@@ -458,9 +460,9 @@ with st.sidebar:
     st.caption("Any symbol or index, all universes. Opens in the Stock Chart tab, using the settings above.")
     searched_symbol = st.selectbox("Symbol", [""] + all_symbols_sorted, index=0, key="global_search_symbol")
 
-(tab_screener, tab_stock_chart, tab_ott, tab_volume_profile, tab_cpr, tab_structure, tab_backtest,
+(tab_screener, tab_stock_chart, tab_ott, tab_fab4, tab_volume_profile, tab_cpr, tab_structure, tab_backtest,
  tab_calls) = st.tabs(
-    ["Screener", "🔍 Stock Chart", "📈 Optimised Trend Trader", "Volume Profile", "🎯 Narrow CPR",
+    ["Screener", "🔍 Stock Chart", "📈 Optimised Trend Trader", "🍀 Fab4", "Volume Profile", "🎯 Narrow CPR",
      "📐 Market Structure", "🧪 Backtest", "📞 Call Performance"]
 )
 
@@ -1363,6 +1365,248 @@ with tab_ott:
             f"OTT({o_length}, {o_percent:g}, {o_ma_type}, {o_source}) | {ott_scan_signal} | last {int(ott_bars)} bars",
         ],
         records=ott_tab_records,
+    )
+
+with tab_fab4:
+    st.title("🍀 Fab4 — Supertrend + RSI + Pivot + Bollinger")
+    st.caption(
+        "**Long (call) setup — all four on the candle's close:** ① Close above Supertrend (10, 3) — trend · "
+        "② RSI(14) above 70 — momentum, bought *not* faded · ③ Close above pivot R1 (Traditional, Auto) — "
+        "one resistance already broken · ④ Close above the upper Bollinger Band (20, 2 SD) — a \"super candle\". "
+        "**Exit:** Supertrend flips (it is also the initial and trailing stop). Intraday positions are squared "
+        "off at the session's last bar. Option strike guide from the source: a premium of ~1% of the underlying. "
+        "Screening/research aid only, not investment advice."
+    )
+
+    with st.expander("⚙️ Settings", expanded=False):
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        with fc1:
+            f4_st_period = st.number_input("Supertrend ATR period", 1, 100, fab4.DEFAULTS["st_period"], key="f4_st_p")
+            f4_st_mult = st.number_input("Supertrend factor", 0.5, 10.0, fab4.DEFAULTS["st_mult"], 0.5, key="f4_st_m")
+        with fc2:
+            f4_rsi_period = st.number_input("RSI period", 2, 100, fab4.DEFAULTS["rsi_period"], key="f4_rsi_p")
+            f4_rsi_long = st.number_input("RSI long above", 50.0, 95.0, fab4.DEFAULTS["rsi_long"], 1.0, key="f4_rsi_l")
+            f4_rsi_short = st.number_input("RSI short below", 5.0, 50.0, fab4.DEFAULTS["rsi_short"], 1.0, key="f4_rsi_s")
+        with fc3:
+            f4_bb_period = st.number_input("Bollinger length", 2, 200, fab4.DEFAULTS["bb_period"], key="f4_bb_p")
+            f4_bb_sd = st.number_input("Bollinger SD", 0.5, 5.0, fab4.DEFAULTS["bb_sd"], 0.5, key="f4_bb_sd")
+        with fc4:
+            f4_short = st.checkbox("Also trade the short (put) mirror", value=False, key="f4_short",
+                                   help="Not in the source — the put rules weren't disclosed. Mirror image: below "
+                                        "Supertrend, RSI below the short level, close below S1, close below the "
+                                        "lower band. Treat as an experiment.")
+            f4_square_off = st.checkbox("Square off intraday at session end", value=True, key="f4_sq")
+            f4_cost = st.number_input("Round-trip cost per trade (% of price)", 0.0, 2.0, 0.03, 0.01,
+                                      key="f4_cost", help="Backtest only. Rough stand-in for slippage + charges "
+                                                          "on the underlying; it does not model option premium.")
+    f4_params = {"st_period": int(f4_st_period), "st_mult": float(f4_st_mult), "rsi_period": int(f4_rsi_period),
+                 "rsi_long": float(f4_rsi_long), "rsi_short": float(f4_rsi_short), "bb_period": int(f4_bb_period),
+                 "bb_sd": float(f4_bb_sd)}
+    f4_sides = ("Long", "Short") if f4_short else ("Long",)
+
+    # --- 1. Screener ---
+    st.subheader("1 · Screen")
+    sc1, sc2, sc3, sc4 = st.columns([1.1, 1, 2.6, 1.2])
+    with sc1:
+        f4_tf_label = st.selectbox("Timeframe", TF_LABELS, index=TF_LABELS.index("5 Minute"), key="f4_tf")
+        f4_tf_key = TF_KEYS[TF_LABELS.index(f4_tf_label)]
+    with sc2:
+        f4_bars = st.number_input("Signal within last N bars", 1, 2000, 75, 5, key="f4_bars",
+                                  help="75 bars = one trading day on 5-minute candles.")
+    with sc3:
+        f4_univ = st.multiselect("Universes", UNIVERSES + [INDEX_UNIVERSE_LABEL],
+                                 default=[INDEX_UNIVERSE_LABEL, "Nifty 100 (Large Cap)"], key="f4_univ")
+    with sc4:
+        st.write("")
+        st.write("")
+        f4_run = st.button("🔎 Screen", type="primary", key="f4_run", use_container_width=True,
+                           disabled=not f4_univ)
+    st.caption(f"Pivots on this timeframe use the previous "
+               f"{ {'D': 'day', 'W': 'week', 'M': 'month', 'Y': 'year'}[fab4.pivot_anchor(f4_tf_key)] } "
+               "(TradingView 'Auto'). Yahoo intraday history: 5/15-min ≈ 60 days, 1-hour ≈ 2 years.")
+
+    f4_scan_key = (f4_tf_key, int(f4_bars), tuple(f4_univ), tuple(sorted(f4_params.items())), f4_sides, f4_square_off)
+    if f4_run:
+        f4_syms = get_all_symbols(f4_univ)[["Symbol", "Segment"]]
+        prog, stat = st.progress(0.0), st.empty()
+        f4_rows = []
+        for i, r in enumerate(f4_syms.itertuples(index=False)):
+            prog.progress((i + 1) / len(f4_syms))
+            stat.text(f"[{i+1}/{len(f4_syms)}] {r.Symbol}")
+            try:
+                fr = load_frame(r.Symbol, f4_tf_key, force_refresh=force_refresh_prices)
+                row = fab4.scan_symbol(r.Symbol, r.Segment, fr, f4_tf_key, int(f4_bars), f4_params, f4_sides,
+                                       f4_square_off)
+            except Exception as e:  # one bad symbol shouldn't kill the scan
+                print(f"[fab4] {r.Symbol}: {e}")
+                row = None
+            if row:
+                f4_rows.append(row)
+        prog.empty()
+        stat.empty()
+        st.session_state["f4_scan"] = (pd.DataFrame(f4_rows), f4_scan_key, f4_tf_label, len(f4_syms))
+
+    f4_shown_symbol, f4_records = None, []
+    f4_scan = st.session_state.get("f4_scan")
+    if f4_scan is None:
+        st.info("Pick a timeframe and universes, then click **Screen**.")
+    else:
+        res, res_key, res_tf_label, res_total = f4_scan
+        if res_key != f4_scan_key:
+            st.warning("Settings changed since this scan — click **Screen** to refresh.")
+        if res.empty:
+            st.caption("No usable data on this timeframe.")
+        else:
+            hits = res[res["Signal"].isin(["Long", "Short"])]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Scanned", f"{len(res)}/{res_total}")
+            m2.metric("🟢 Long signals", int((hits["Signal"] == "Long").sum()))
+            m3.metric("🔴 Short signals", int((hits["Signal"] == "Short").sum()))
+            m4.metric("Open now", int((hits["Status"] == "Open").sum()))
+
+            v1, v2 = st.columns([2, 2])
+            f4_show = v1.radio("Show", ["Signals", "Open trades only", "All (incl. no signal)"], horizontal=True,
+                               key="f4_show")
+            f4_max_ago = v2.slider("Signal within last N bars", 0, int(res_key[1]), int(res_key[1]), key="f4_max_ago")
+            view = res.copy()
+            if f4_show != "All (incl. no signal)":
+                view = view[view["Signal"].isin(["Long", "Short"]) & (view["BarsAgo"] <= f4_max_ago)]
+            if f4_show == "Open trades only":
+                view = view[view["Status"] == "Open"]
+            view = view.sort_values(["BarsAgo", "Symbol"], na_position="last")
+            view["AsOf"] = _fmt_asof(view["AsOf"], res_key[0])
+            cols = ["Symbol", "Segment", "Signal", "BarsAgo", "Status", "Entry", "Close", "P&L %", "Supertrend",
+                    "RSI", "R1", "S1", "Long now", "Short now", "Trend", "AsOf"]
+            st.markdown(f"**{len(view)} result(s)** — {res_tf_label}. *Long now / Short now* = the four conditions "
+                        "on the latest bar in order Trend · RSI · Pivot · Bollinger (✅ met).")
+            st.dataframe(view[[c for c in cols if c in view.columns]], use_container_width=True, hide_index=True)
+            f4_records = [{"Symbol": r.Symbol, "Signal": r.Signal, "Status": r.Status, "Entry": r.Entry,
+                           "Close": r.Close} for r in view.head(40).itertuples()]
+            pick = view["Symbol"].tolist() or sorted(res["Symbol"].tolist())
+            f4_shown_symbol = st.selectbox("📈 Chart a stock from the results", pick, key="f4_symbol")
+
+    # --- 2. Chart ---
+    if f4_shown_symbol:
+        st.subheader("2 · Chart")
+        f4_chart_tf = f4_scan[1][0]
+        with st.spinner(f"Fetching {f4_shown_symbol}..."):
+            f4_full = load_frame(f4_shown_symbol, f4_chart_tf, force_refresh=force_refresh_prices)
+        if f4_full is None or len(f4_full) < 40:
+            st.error(f"Not enough price history for {f4_shown_symbol} on {f4_scan[2]}.")
+        else:
+            f4_ind = fab4.compute(f4_full, f4_chart_tf, f4_params)
+            f4_tr = fab4.backtest({f4_shown_symbol: f4_full}, f4_chart_tf, f4_params, f4_sides,
+                                  square_off=f4_square_off, cost_pct=float(f4_cost))
+            last = f4_ind.iloc[-1]
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Close", f"{f4_full['Close'].iloc[-1]:,.2f}")
+            k2.metric("Supertrend", f"{last['ST']:,.2f}", "Up" if last["Dir"] == 1 else "Down", delta_color="off")
+            k3.metric("RSI", f"{last['RSI']:.1f}")
+            k4.metric("R1 / S1", f"{last['R1']:,.0f} / {last['S1']:,.0f}")
+            k5.metric("~1% premium guide", f"₹{f4_full['Close'].iloc[-1] * 0.01:,.1f}")
+            f4_disp = st.slider("Bars on chart", min(50, len(f4_full) - 10), min(2000, len(f4_full)), min(300, len(f4_full)), 25,
+                                key="f4_disp")
+            fig = build_fab4_chart(f4_full, f4_ind, f4_shown_symbol, f4_scan[2], int(f4_disp), f4_tr,
+                                   f4_params["rsi_long"], f4_params["rsi_short"], show_short_levels=f4_short)
+            st.plotly_chart(fig, use_container_width=True, key="f4_fig", config=PLOTLY_CONFIG)
+            if not f4_tr.empty:
+                s = fab4.summarize(f4_tr)
+                st.caption(f"This symbol on the loaded history: {s['Trades']} closed trades · win rate "
+                           f"{s['Win rate %']}% · total {s['Total return %']}% ({s['Total points']} pts) · "
+                           f"profit factor {s['Profit factor']}.")
+                with st.expander("📜 Trades on this symbol"):
+                    show = f4_tr.sort_values("EntryTime", ascending=False).copy()
+                    show["EntryTime"] = _fmt_asof(show["EntryTime"], f4_chart_tf)
+                    show["ExitTime"] = _fmt_asof(show["ExitTime"], f4_chart_tf)
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+
+    # --- 3. Backtest ---
+    st.divider()
+    st.subheader("3 · Backtest — does each indicator earn its place?")
+    st.caption(
+        "Rebuilds the system one indicator at a time, the way the source does: Supertrend alone → + RSI → "
+        "+ R1 → + Bollinger (Fab4), plus the *same setup below R1* as a contrast. Entries and exits at bar "
+        "close on the underlying; returns are % of the underlying minus your cost setting, not option P&L."
+    )
+    b1, b2, b3 = st.columns([1.6, 1, 2])
+    with b1:
+        f4_src = st.radio("Data", ["Kite 5-min cache", "Yahoo (live fetch)"], horizontal=True, key="f4_src",
+                          help="Kite cache = data/kite_5min snapshot (~3 months, Nifty 100 + NIFTY 50). "
+                               "Yahoo = the screener timeframe, ~60 days for 5/15-min.")
+    if f4_src == "Kite 5-min cache":
+        kite_avail = sorted(os.path.splitext(os.path.basename(f))[0]
+                            for f in glob.glob(os.path.join(oliver_ma_cross_backtest.KITE_5MIN_DIR, "*.csv")))
+        with b2:
+            f4_kite_min = st.selectbox("Candle", [5, 15, 30, 60], format_func=lambda m: f"{m} min", key="f4_kmin")
+        with b3:
+            default_k = ["NIFTY50"] if "NIFTY50" in kite_avail else kite_avail[:1]
+            f4_bt_syms = st.multiselect("Symbols", kite_avail, default=default_k, key="f4_bt_syms_k",
+                                        help="NIFTY50 = the index. Add stocks, or all of them for a broad test.")
+        f4_bt_tf = fab4.KITE_TF[f4_kite_min]
+    else:
+        with b2:
+            f4_bt_tf_label = st.selectbox("Timeframe", TF_LABELS, index=TF_LABELS.index("5 Minute"), key="f4_bt_tf")
+            f4_bt_tf = TF_KEYS[TF_LABELS.index(f4_bt_tf_label)]
+        with b3:
+            f4_bt_syms = st.multiselect("Symbols", all_symbols_sorted,
+                                        default=["NIFTY 50"] if "NIFTY 50" in all_symbols_sorted else [],
+                                        key="f4_bt_syms_y")
+
+    if st.button("▶️ Run Fab4 backtest", type="primary", key="f4_bt_run", disabled=not f4_bt_syms):
+        frames = {}
+        with st.spinner("Loading price history..."):
+            for s in f4_bt_syms:
+                frames[s] = (fab4.kite_frame(s, f4_kite_min) if f4_src == "Kite 5-min cache"
+                             else load_frame(s, f4_bt_tf, force_refresh=force_refresh_prices))
+        with st.spinner("Backtesting..."):
+            lad = fab4.ladder(frames, f4_bt_tf, f4_params, f4_sides, f4_square_off, float(f4_cost))
+            trades = fab4.backtest(frames, f4_bt_tf, f4_params, f4_sides, square_off=f4_square_off,
+                                   cost_pct=float(f4_cost))
+        spans = [(f.index[0], f.index[-1]) for f in frames.values() if f is not None and len(f)]
+        st.session_state["f4_bt"] = (lad, trades, f4_bt_tf, spans)
+
+    f4_bt = st.session_state.get("f4_bt")
+    if f4_bt is None:
+        st.info("Pick symbols and click **Run Fab4 backtest**.")
+    else:
+        lad, trades, bt_tf, spans = f4_bt
+        bt_tf_fmt = bt_tf if bt_tf in TIMEFRAMES else "5MIN"
+        if spans:
+            st.caption(f"Data window: {min(s[0] for s in spans):%d-%b-%Y} → {max(s[1] for s in spans):%d-%b-%Y}")
+        st.dataframe(lad, use_container_width=True, hide_index=True,
+                     column_config={"Total return %": st.column_config.NumberColumn(format="%.2f%%"),
+                                    "Max DD %": st.column_config.NumberColumn(format="%.2f%%")})
+        st.caption("Total return % = sum of per-trade % moves of the underlying (not compounded). Top-5 share = "
+                   "how much of the gross profit came from the five best trades — the source's point that a few "
+                   "big trend days carry a 40–45% win-rate system.")
+        closed = trades[trades["ExitReason"] != "Open (end of data)"] if not trades.empty else trades
+        if closed is not None and not closed.empty:
+            eq = closed.sort_values("ExitTime")
+            figq = go.Figure(go.Scatter(x=eq["ExitTime"], y=eq["ReturnPct"].cumsum(), mode="lines",
+                                        name="Fab4 cumulative %"))
+            figq.update_layout(height=320, margin=dict(l=10, r=10, t=30, b=10), dragmode="pan",
+                               title="Fab4 equity curve (cumulative % of underlying)", yaxis_title="%")
+            st.plotly_chart(figq, use_container_width=True, key="f4_eq", config=PLOTLY_CONFIG)
+
+            if closed["Symbol"].nunique() > 1:
+                per = pd.DataFrame([{"Symbol": sym, **fab4.summarize(g)} for sym, g in closed.groupby("Symbol")]
+                                   ).sort_values("Total return %", ascending=False)
+                with st.expander("Per-symbol breakdown"):
+                    st.dataframe(per, use_container_width=True, hide_index=True)
+            with st.expander(f"All Fab4 trades ({len(trades)})"):
+                show = trades.sort_values("EntryTime", ascending=False).copy()
+                show["EntryTime"] = _fmt_asof(show["EntryTime"], bt_tf_fmt)
+                show["ExitTime"] = _fmt_asof(show["ExitTime"], bt_tf_fmt)
+                st.dataframe(show, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No Fab4 trades in this window — try more symbols, a longer history or a different candle.")
+
+    render_telegram_send_button(
+        "f4_tab",
+        header_lines=[f"{datetime.now():%d-%b-%Y %H:%M} IST",
+                      f"🍀 Fab4 screen — {f4_scan[2] if f4_scan else f4_tf_label}",
+                      "Supertrend(10,3) · RSI>70 · Close>R1 · Close>BB(20,2) upper"],
+        records=f4_records,
     )
 
 with tab_volume_profile:

@@ -277,6 +277,83 @@ def add_ott_overlay(fig, full_frame: pd.DataFrame, display_bars: int, length: in
     return fig
 
 
+def build_fab4_chart(full_frame: pd.DataFrame, ind: pd.DataFrame, symbol: str, timeframe_label: str,
+                     display_bars: int = 250, trades: pd.DataFrame | None = None,
+                     rsi_long: float = 70.0, rsi_short: float = 30.0, show_short_levels: bool = False) -> go.Figure:
+    """Fab4 view: candles + Supertrend (green/red) + Bollinger Bands + pivot P/R1/S1 on top,
+    RSI with the 70/30 lines below, and entry/exit markers from fab4.simulate() trades.
+    `ind` is fab4.compute() on the COMPLETE history, so every line is warm from the first bar shown."""
+    frame = full_frame.tail(display_bars)
+    ind = ind.loc[frame.index]
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.03)
+
+    fig.add_trace(go.Candlestick(x=frame.index, open=frame["Open"], high=frame["High"], low=frame["Low"],
+                                 close=frame["Close"], name=symbol, showlegend=False), row=1, col=1)
+
+    # Bollinger Bands (20, 2)
+    fig.add_trace(go.Scatter(x=frame.index, y=ind["BB_up"], mode="lines", name="BB upper",
+                             line=dict(width=1, color="rgba(33,150,243,0.8)")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=frame.index, y=ind["BB_lo"], mode="lines", name="BB lower",
+                             line=dict(width=1, color="rgba(33,150,243,0.8)"), fill="tonexty",
+                             fillcolor="rgba(33,150,243,0.05)"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=frame.index, y=ind["BB_mid"], mode="lines", name="BB basis",
+                             line=dict(width=1, color="rgba(255,109,0,0.7)")), row=1, col=1)
+
+    # Pivot levels (step lines -- constant within each anchor period)
+    pivot_cols = [("R1", "#C62828", "dash"), ("P", "#9E9E9E", "dot"), ("S1", "#2E7D32", "dash")]
+    for col_name, colour, dash in pivot_cols:
+        if col_name == "S1" and not show_short_levels:
+            continue
+        fig.add_trace(go.Scatter(x=frame.index, y=ind[col_name], mode="lines", name=col_name,
+                                 line=dict(width=1.2, color=colour, dash=dash, shape="hv")), row=1, col=1)
+
+    # Supertrend, coloured by direction
+    up = ind["ST"].where(ind["Dir"] == 1)
+    dn = ind["ST"].where(ind["Dir"] == -1)
+    fig.add_trace(go.Scatter(x=frame.index, y=up, mode="lines", name="Supertrend ↑",
+                             line=dict(width=2, color="#00A800")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=frame.index, y=dn, mode="lines", name="Supertrend ↓",
+                             line=dict(width=2, color="#E53935")), row=1, col=1)
+
+    # Trades
+    if trades is not None and not trades.empty:
+        t = trades[trades["EntryTime"] >= frame.index[0]]
+        for side, sym_in, col_in in (("Long", "triangle-up", "#00C853"), ("Short", "triangle-down", "#FF1744")):
+            ts = t[t["Direction"] == side]
+            if ts.empty:
+                continue
+            fig.add_trace(go.Scatter(
+                x=ts["EntryTime"], y=ts["EntryPrice"], mode="markers", name=f"{side} entry",
+                marker=dict(symbol=sym_in, size=13, color=col_in, line=dict(width=1, color="black")),
+                hovertemplate=f"{side} entry %{{y:.2f}}<extra></extra>"), row=1, col=1)
+            closed = ts[ts["ExitReason"] != "Open (end of data)"]
+            fig.add_trace(go.Scatter(
+                x=closed["ExitTime"], y=closed["ExitPrice"], mode="markers", name=f"{side} exit",
+                marker=dict(symbol="x", size=10, color="#424242"),
+                text=closed["ExitReason"] + " · " + closed["ReturnPct"].map(lambda v: f"{v:+.2f}%"),
+                hovertemplate="Exit %{y:.2f}<br>%{text}<extra></extra>"), row=1, col=1)
+
+    # RSI pane
+    fig.add_trace(go.Scatter(x=frame.index, y=ind["RSI"], mode="lines", name="RSI",
+                             line=dict(width=1.5, color="#7E57C2"), showlegend=False), row=2, col=1)
+    fig.add_hline(y=rsi_long, line=dict(color="#2E7D32", width=1, dash="dash"), row=2, col=1)
+    if show_short_levels:
+        fig.add_hline(y=rsi_short, line=dict(color="#C62828", width=1, dash="dash"), row=2, col=1)
+    fig.update_yaxes(range=[0, 100], row=2, col=1, title_text="RSI")
+
+    _apply_crosshair(fig, timeframe_label, rows=2)
+    if "Minute" in timeframe_label or "Hour" in timeframe_label:
+        # Collapse nights and weekends so intraday candles sit side by side like on Kite/TradingView
+        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"]), dict(bounds=[15.5, 9.25], pattern="hour")])
+    elif timeframe_label == "1 Day":
+        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    fig.update_layout(title=dict(text=f"{symbol} — {timeframe_label} — Fab4", y=0.98),
+                      xaxis_rangeslider_visible=False, dragmode="pan", height=680,
+                      margin=dict(l=40, r=20, t=110, b=30),
+                      legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0, xanchor="left"))
+    return fig
+
+
 def build_structure_chart(full_frame: pd.DataFrame, symbol: str, timeframe_label: str, order: int,
                            display_bars: int = 250) -> go.Figure:
     """full_frame: the COMPLETE OHLC history -- swings are found over the full series
