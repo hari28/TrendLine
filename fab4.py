@@ -347,7 +347,15 @@ def scan_symbol(symbol: str, segment: str, frame: pd.DataFrame | None, timeframe
         "S1": round(float(last["S1"]), 2) if pd.notna(last["S1"]) else None,
         "Long now": "".join(tick(last[f"L_{c}"]) for c in ALL_CONDS),
         "Short now": "".join(tick(last[f"S_{c}"]) for c in ALL_CONDS),
+        "LongMet": int(sum(bool(last[f"L_{c}"]) for c in ALL_CONDS)),
+        "ShortMet": int(sum(bool(last[f"S_{c}"]) for c in ALL_CONDS)),
+        "BB upper": round(float(last["BB_up"]), 2) if pd.notna(last["BB_up"]) else None,
+        "BB lower": round(float(last["BB_lo"]), 2) if pd.notna(last["BB_lo"]) else None,
     }
+    base["Missing (long)"] = ", ".join(n for c, n in zip(ALL_CONDS, ("Trend", "RSI", "R1", "Bollinger"))
+                                       if not bool(last[f"L_{c}"]))
+    base["Missing (short)"] = ", ".join(n for c, n in zip(ALL_CONDS, ("Trend", "RSI", "S1", "Bollinger"))
+                                        if not bool(last[f"S_{c}"]))
     if not recent:
         return {**base, "Signal": "None", "BarsAgo": np.nan, "Status": "", "Entry": None, "P&L %": None}
     t = max(recent, key=lambda t: t["EntryTime"])

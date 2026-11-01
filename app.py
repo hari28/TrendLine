@@ -1458,12 +1458,57 @@ with tab_fab4:
             st.caption("No usable data on this timeframe.")
         else:
             hits = res[res["Signal"].isin(["Long", "Short"])]
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m0, m2, m3, m4 = st.columns(5)
             m1.metric("Scanned", f"{len(res)}/{res_total}")
-            m2.metric("🟢 Long signals", int((hits["Signal"] == "Long").sum()))
-            m3.metric("🔴 Short signals", int((hits["Signal"] == "Short").sum()))
-            m4.metric("Open now", int((hits["Status"] == "Open").sum()))
+            n_now = int((res.get("LongMet", pd.Series(dtype=int)) == 4).sum())
+            if "Short" in res_key[4]:
+                n_now += int((res.get("ShortMet", pd.Series(dtype=int)) == 4).sum())
+            m0.metric("✅ Fab4 now", n_now, help="Stocks meeting all four conditions on the latest candle.")
+            m2.metric("🟢 Long signals", int((hits["Signal"] == "Long").sum()), help="Entries in the window.")
+            m3.metric("🔴 Short signals", int((hits["Signal"] == "Short").sum()), help="Entries in the window.")
+            m4.metric("Trades open", int((hits["Status"] == "Open").sum()))
 
+            # --- Fab4 right now: every condition met on the latest candle ---
+            res_sides = res_key[4]
+            asof_txt = _fmt_asof(res["AsOf"].tail(1), res_key[0]).iloc[0] if len(res) else ""
+            st.markdown(f"### ✅ Fab4 stocks right now — all 4 conditions on the latest candle")
+            st.caption(f"Latest candle: {asof_txt} ({res_tf_label}). Long = above Supertrend · RSI > "
+                       f"{f4_params['rsi_long']:g} · above R1 · above upper Bollinger"
+                       + (f". Short = mirror (below Supertrend · RSI < {f4_params['rsi_short']:g} · below S1 · "
+                          "below lower Bollinger)." if "Short" in res_sides else ".")
+                       + " Outside market hours this is the last close of the previous session.")
+            now_parts = [("Long", "LongMet", "BB upper", "R1")]
+            if "Short" in res_sides:
+                now_parts.append(("Short", "ShortMet", "BB lower", "S1"))
+            now_cols_base = ["Symbol", "Segment", "Close", "Supertrend", "RSI", "AsOf"]
+            for side, met_col, bb_col, piv_col in now_parts:
+                if met_col not in res.columns:
+                    st.warning("Re-run **Screen** to see this table (the scan was made by an older version).")
+                    break
+                full = res[res[met_col] == 4].copy()
+                full["Setup"] = side
+                full["~1% premium"] = (full["Close"] * 0.01).round(1)
+                full["AsOf"] = _fmt_asof(full["AsOf"], res_key[0])
+                full = full.sort_values("RSI", ascending=(side == "Short"))
+                icon = "🟢" if side == "Long" else "🔴"
+                st.markdown(f"**{icon} {side} — {len(full)} stock(s) meet all four**")
+                if full.empty:
+                    st.caption("None on the latest candle.")
+                else:
+                    st.dataframe(full[["Symbol", "Segment", "Setup", "Close", "Supertrend", "RSI", piv_col,
+                                       bb_col, "~1% premium", "AsOf"]],
+                                 use_container_width=True, hide_index=True)
+                near = res[res[met_col] == 3].copy()
+                miss_col = f"Missing ({side.lower()})"
+                if not near.empty:
+                    near["AsOf"] = _fmt_asof(near["AsOf"], res_key[0])
+                    with st.expander(f"👀 Watchlist — {len(near)} stock(s) meet 3 of 4 ({side})"):
+                        st.dataframe(near[["Symbol", "Segment", miss_col] + now_cols_base[2:]],
+                                     use_container_width=True, hide_index=True)
+
+            st.markdown("### 📜 Recent Fab4 signals")
+            st.caption("Every Fab4 entry that fired in the window below, and whether that trade is still open "
+                       "or has already exited.")
             v1, v2 = st.columns([2, 2])
             f4_show = v1.radio("Show", ["Signals", "Open trades only", "All (incl. no signal)"], horizontal=True,
                                key="f4_show")
