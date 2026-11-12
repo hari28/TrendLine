@@ -16,6 +16,8 @@ from urllib.parse import quote_plus
 
 import requests
 
+NEWS_VERSION = 2  # bump whenever the filtering changes, so cached session news is refetched
+
 _UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
 _SUFFIX = re.compile(r"\b(ltd|limited|corporation|corp|co|company|india|inc|plc)\b\.?", re.I)
@@ -57,7 +59,9 @@ def _yf_news(symbol: str, days: int, max_items: int) -> list[dict]:
     import yfinance as yf
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     out = []
-    for n in (yf.Ticker(f"{symbol}.NS").news or []):
+    t = yf.Ticker(f"{symbol}.NS")
+    raw = t.get_news(count=max_items) if hasattr(t, "get_news") else t.news
+    for n in (raw or []):
         c = n.get("content", n)  # yfinance >=0.2.50 nests fields under "content"
         title = c.get("title")
         if not title:
@@ -76,18 +80,49 @@ def _yf_news(symbol: str, days: int, max_items: int) -> list[dict]:
     return out[:max_items]
 
 
+_GENERIC = {"the", "and", "of", "bank", "india", "indian", "national", "industries", "finance", "financial",
+            "services", "power", "energy", "steel", "tata", "bajaj", "adani", "hindustan", "bharat", "state",
+            "solar", "green", "cement", "cements", "auto", "motors", "pharma", "pharmaceuticals", "capital",
+            "chemicals", "infra", "metal", "metals", "oil", "gas", "life", "insurance", "housing", "general",
+            "united", "new", "global", "first", "max", "union", "central", "punjab", "indraprastha", "gujarat"}
+
+
+def _is_relevant(title: str, symbol: str, name: str) -> bool:
+    """Google News matches a quoted phrase anywhere in the article body, so loosely related
+    stories (e.g. a Nava Ltd result for a 'Solar Industries' query) slip in. Keep a headline
+    only if it actually names the company: the full cleaned name, its first two words, the
+    NSE symbol as a whole word, or a distinctive first word (not generic like Tata/Bank/India)."""
+    t = " " + re.sub(r"[^a-z0-9& ]", " ", title.lower().replace("&", " and ")) + " "
+    t = re.sub(r"\s+", " ", t)
+    words = name.lower().split()
+    checks = []
+    if words:
+        checks.append(" ".join(words))
+        if len(words) >= 2:
+            checks.append(" ".join(words[:2]))
+        if len(words[0]) >= 4 and words[0] not in _GENERIC:
+            checks.append(words[0])
+    if len(symbol) >= 3:
+        checks.append(symbol.lower())
+    return any(f" {c} " in t for c in checks)
+
+
 def fetch_news(symbol: str, company_name: str | None = None, days: int = 3, max_items: int = 5) -> list[dict]:
-    """Latest headlines for one NSE symbol within the last `days` days. Never raises."""
+    """Latest headlines for one NSE symbol within the last `days` days. Never raises.
+    Only headlines that actually name the company (see _is_relevant) are kept."""
     name = _clean_name(company_name)
-    query = f'"{name}" OR "{symbol}"' if name else f'"{symbol}" NSE share'
+    query = f'"{name}" share OR stock OR "{symbol}"' if name else f'"{symbol}" NSE share'
     try:
-        items = _google_news(query, days, max_items)
+        items = [n for n in _google_news(query, days, 50) if _is_relevant(n["title"], symbol, name or symbol)]
         if items:
-            return items
+            return items[:max_items]
     except Exception:
         pass
     try:
-        return _yf_news(symbol, days, max_items)
+        # Yahoo's feed for NSE tickers is often generic market news (verified: SOLARINDS.NS returned a
+        # Nava press release), so the same "must name the company" filter applies here too.
+        items = [n for n in _yf_news(symbol, days, 50) if _is_relevant(n["title"], symbol, name or symbol)]
+        return items[:max_items]
     except Exception:
         return []
 

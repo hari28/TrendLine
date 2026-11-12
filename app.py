@@ -1858,7 +1858,7 @@ with tab_cpr:
             cpr_news = {}
             if cpr_news_on:
                 syms = narrow_table["Symbol"].str.replace(" ⚠️", "", regex=False)
-                news_key = (st.session_state["cpr_scanned_at"], tuple(sorted(syms)), cpr_news_days)
+                news_key = (news.NEWS_VERSION, st.session_state["cpr_scanned_at"], tuple(sorted(syms)), cpr_news_days)
                 if st.session_state.get("cpr_news_key") != news_key:
                     names = st.session_state.get("cpr_names", {})
                     news_status = st.empty()
@@ -1885,6 +1885,7 @@ with tab_cpr:
             st.dataframe(
                 narrow_table, use_container_width=True, hide_index=True,
                 column_config={
+                    "Width %": st.column_config.NumberColumn("Width %", format="%.2f", width="small"),
                     "Latest News": st.column_config.TextColumn("📰 Latest News", width="large"),
                     "Link": st.column_config.LinkColumn("Link", display_text="Open ↗", width="small"),
                 },
