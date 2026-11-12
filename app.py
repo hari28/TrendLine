@@ -48,6 +48,7 @@ import fab4
 from ott import MA_TYPES as OTT_MA_TYPES, SOURCES as OTT_SOURCES, calc_ott, get_source, crossover, crossunder
 import screener_alert
 import cpr
+import news
 import structure
 import fo_universe
 import telegram_bot
@@ -1727,7 +1728,7 @@ with tab_cpr:
         cpr_universe = st.selectbox("Universe", UNIVERSE_OPTIONS, index=0, key="cpr_universe")
     with c2:
         cpr_width_lt = st.number_input(
-            "Width % less than", min_value=0.0, max_value=10.0, value=0.5, step=0.05,
+            "Width % less than", min_value=0.0, max_value=10.0, value=0.05, step=0.01,
             format="%.2f", key="cpr_width_lt",
         )
     with c3:
@@ -1743,6 +1744,12 @@ with tab_cpr:
         cpr_fo_only = st.checkbox("F&O Stocks Only", value=False, key="cpr_fo_only")
     with c6:
         cpr_force_refresh = st.checkbox("Force-refresh price history", value=False, key="cpr_force_refresh")
+
+    cpr_news_on = True  # news is always fetched for the filtered list
+    c7, _c8 = st.columns([2, 2])
+    with c7:
+        cpr_news_days = st.selectbox("News lookback", [1, 2, 3, 7], index=1, key="cpr_news_days",
+                                     format_func=lambda d: f"Last {d} day" + ("s" if d > 1 else ""))
 
     cpr_run = st.button("Run CPR scan", type="primary", key="cpr_run")
 
@@ -1783,6 +1790,10 @@ with tab_cpr:
         cpr_status.text(f"Done in {cpr_elapsed:.0f}s — {len(cpr_results)}/{len(cpr_symbols_df)} symbols had usable data.")
 
         st.session_state["cpr_results"] = cpr_results
+        st.session_state["cpr_names"] = (
+            dict(zip(cpr_symbols_df["Symbol"], cpr_symbols_df["Company Name"]))
+            if "Company Name" in cpr_symbols_df.columns else {}
+        )
         st.session_state["cpr_scanned_at"] = pd.Timestamp.now()
         st.session_state["cpr_scanned_universe"] = cpr_universe
         st.session_state["cpr_scanned_fo_only"] = cpr_fo_only and cpr_universe != INDEX_UNIVERSE_LABEL
@@ -1825,18 +1836,16 @@ with tab_cpr:
                 mask &= symbol_lower.str.contains(term, na=False)
             cdf = cdf[mask]
 
-        display_cols = ["Symbol", "PrevClose", "PrevHigh", "PrevLow", "Range", "TC", "Pivot", "BC",
-                         "WidthPct", "Category", "AsOf", "IsStale"]
-        rename = {"PrevClose": "Prev Close", "PrevHigh": "Prev High", "PrevLow": "Prev Low",
-                   "WidthPct": "Width %", "IsStale": "Data"}
+        display_cols = ["Symbol", "WidthPct", "PrevClose", "TC", "Pivot", "BC"]
+        rename = {"PrevClose": "Prev Close", "WidthPct": "Width %"}
 
         def _fmt_cpr(d):
             out = d[display_cols].rename(columns=rename).copy()
-            for col in ["Prev Close", "Prev High", "Prev Low", "Range", "TC", "Pivot", "BC"]:
+            for col in ["Prev Close", "TC", "Pivot", "BC"]:
                 out[col] = out[col].round(2)
             out["Width %"] = out["Width %"].round(2)
-            out["Data"] = out["Data"].map({True: "⚠️ Stale", False: "✅ Current"})
-            out["AsOf"] = _fmt_asof(out["AsOf"], "1D")
+            if "IsStale" in d.columns:  # stale rows keep a ⚠️ marker on the symbol instead of a separate column
+                out.loc[d["IsStale"].fillna(False).values, "Symbol"] += " ⚠️"
             return out.sort_values(by="Width %")
 
         narrow_filtered = cdf[(cdf["WidthPct"] < cpr_width_lt) & (cdf["WidthPct"] >= cpr_width_gte)].copy()
@@ -1845,13 +1854,63 @@ with tab_cpr:
         if narrow_filtered.empty:
             st.write("No stocks currently fall in this Width % range with these settings.")
         else:
-            st.dataframe(_fmt_cpr(narrow_filtered), use_container_width=True, hide_index=True)
+            narrow_table = _fmt_cpr(narrow_filtered)
+            cpr_news = {}
+            if cpr_news_on:
+                syms = narrow_table["Symbol"].str.replace(" ⚠️", "", regex=False)
+                news_key = (st.session_state["cpr_scanned_at"], tuple(sorted(syms)), cpr_news_days)
+                if st.session_state.get("cpr_news_key") != news_key:
+                    names = st.session_state.get("cpr_names", {})
+                    news_status = st.empty()
+                    news_status.text(f"📰 Checking news for {len(narrow_table)} stocks...")
+                    st.session_state["cpr_news"] = news.fetch_news_bulk(
+                        [(s, names.get(s)) for s in syms], days=cpr_news_days,
+                        progress_cb=lambda i, t, s: news_status.text(f"📰 Checking news [{i+1}/{t}] {s}"),
+                    )
+                    st.session_state["cpr_news_key"] = news_key
+                    news_status.empty()
+                cpr_news = st.session_state.get("cpr_news", {})
+                def _latest(s):
+                    items = cpr_news.get(s) or []
+                    if not items:
+                        return "—", None
+                    n = items[0]
+                    when = (pd.Timestamp(n["published"]).tz_convert("Asia/Kolkata").strftime("%d-%b")
+                            if n.get("published") else "")
+                    extra = f" (+{len(items) - 1} more)" if len(items) > 1 else ""
+                    return f"{n['title']} — {n.get('source', '')} {when}{extra}".strip(), n.get("link") or None
+                latest = syms.map(_latest)
+                narrow_table.insert(2, "Latest News", latest.map(lambda x: x[0]).values)
+                narrow_table.insert(3, "Link", latest.map(lambda x: x[1]).values)
+            st.dataframe(
+                narrow_table, use_container_width=True, hide_index=True,
+                column_config={
+                    "Latest News": st.column_config.TextColumn("📰 Latest News", width="large"),
+                    "Link": st.column_config.LinkColumn("Link", display_text="Open ↗", width="small"),
+                },
+            )
+
+            if cpr_news_on:
+                with_news = [s for s in syms if cpr_news.get(s)]
+                st.caption(f"📰 {len(with_news)} of {len(narrow_table)} stocks have news in the last "
+                           f"{cpr_news_days} day{'s' if cpr_news_days > 1 else ''}. All headlines below.")
+                for s in with_news:
+                    width = narrow_table.loc[syms == s, "Width %"].iloc[0]
+                    with st.expander(f"{s} · Width {width:.2f}% · {len(cpr_news[s])} headline(s)", expanded=False):
+                        for n in cpr_news[s]:
+                            when = (pd.Timestamp(n["published"]).tz_convert("Asia/Kolkata").strftime("%d-%b %H:%M")
+                                    if n.get("published") else "")
+                            meta = " · ".join(x for x in [n.get("source"), when] if x)
+                            st.markdown(f"- [{n['title']}]({n['link']})  \n  <small>{meta}</small>",
+                                        unsafe_allow_html=True)
+
             st.download_button(
                 "Download this list (CSV)",
-                _fmt_cpr(narrow_filtered).to_csv(index=False),
+                narrow_table.to_csv(index=False),
                 file_name=f"narrow_cpr_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
             )
-            cpr_narrow_records = _fmt_cpr(narrow_filtered)[["Symbol", "Width %", "TC", "Pivot", "BC"]] \
+            cpr_narrow_records = narrow_table[["Symbol", "Width %", "TC", "Pivot", "BC"]
+                                              + (["Latest News"] if "Latest News" in narrow_table.columns else [])] \
                 .to_dict("records")
 
         narrow = cdf[cdf["Category"] == "Narrow"]
