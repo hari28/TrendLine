@@ -1748,7 +1748,7 @@ with tab_cpr:
     cpr_news_on = True  # news is always fetched for the filtered list
     c7, _c8 = st.columns([2, 2])
     with c7:
-        cpr_news_days = st.selectbox("News lookback", [1, 2, 3, 7], index=1, key="cpr_news_days",
+        cpr_news_days = st.selectbox("News lookback", [1, 2, 3, 7], index=0, key="cpr_news_days",
                                      format_func=lambda d: f"Last {d} day" + ("s" if d > 1 else ""))
 
     cpr_run = st.button("Run CPR scan", type="primary", key="cpr_run")
