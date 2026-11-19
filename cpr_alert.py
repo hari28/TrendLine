@@ -20,8 +20,9 @@ import logging
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
-from constituents import get_all_symbols
-from cpr import scan_universe_cpr, WIDTH_NARROW_MAX
+import nse_bhavcopy
+
+CPR_WIDTH_LT = 0.05  # Narrow CPR: 0% < width < 0.05% (same as the Narrow CPR tab)
 from telegram_bot import send_telegram_message
 
 logger = logging.getLogger("trendline.cpr_alert")
@@ -32,8 +33,8 @@ STATE_PATH = os.path.join(DATA_DIR, "cpr_state.json")
 
 ALL_UNIVERSES = ["Nifty 100 (Large Cap)", "Nifty Midcap 150", "Nifty Smallcap 250"]
 
-MARKET_CLOSE = dtime(15, 30)
-DAILY_WINDOW_END = dtime(16, 0)
+MARKET_CLOSE = dtime(18, 30)  # Bhavcopy download time (IST)
+DAILY_WINDOW_END = dtime(23, 59)
 
 
 def _load_json(path: str, default):
@@ -66,7 +67,7 @@ def _format_message(now_ist: datetime, details: list[dict]) -> str:
 
 def run_cycle(now_ist: datetime, send_alerts: bool = True) -> dict:
     """Runs at most once per calendar day, in the post-close window
-    (15:30-16:00 IST) -- same window universe_digest.py uses for its daily
+    (after 18:30 IST, once NSE's Bhavcopy is out) -- same window universe_digest.py uses for its daily
     combos, since that's when the day's session first becomes "completed".
     Self-gates on its own state, so it's safe to call every 15-min cycle."""
     state = _load_json(STATE_PATH, {"narrow_symbols": [], "last_run": None})
@@ -82,15 +83,16 @@ def run_cycle(now_ist: datetime, send_alerts: bool = True) -> dict:
     is_first_run = state.get("last_run") is None
 
     try:
-        symbols_df = get_all_symbols(ALL_UNIVERSES, force_refresh=False)[["Symbol", "Segment"]]
-        results = scan_universe_cpr(symbols_df, force_refresh=False)
+        results = nse_bhavcopy.scan_bhavcopy_cpr(fo_only=False, now_ist=now_ist)
+        if results.empty or results["AsOf"].iloc[0].date() != now_ist.date():
+            return {"ran": False, "reason": "today's Bhavcopy not available yet", "hits": 0}
     except Exception as e:
         logger.error("CPR universe scan failed: %s", e)
         return {"ran": False, "reason": f"scan failed: {e}", "hits": 0}
 
     current_narrow = {}
     if not results.empty:
-        narrow = results[results["WidthPct"] <= WIDTH_NARROW_MAX]
+        narrow = results[(results["WidthPct"] > 0) & (results["WidthPct"] < CPR_WIDTH_LT)]
         current_narrow = {r.Symbol: float(r.WidthPct) for r in narrow.itertuples()}
 
     prev_keys = set(state["narrow_symbols"])

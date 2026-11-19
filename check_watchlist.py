@@ -91,6 +91,17 @@ def main():
         return
 
     try:
+        # Narrow CPR runs from NSE Bhavcopy, published after ~18:00 IST, so it has its
+        # own window (18:30 IST onward) outside the market-hours window.
+        if now_ist.weekday() < 5 and now_ist.time() >= cpr_alert.MARKET_CLOSE:
+            cpr_result = cpr_alert.run_cycle(now_ist, send_alerts=True)
+            if cpr_result["ran"]:
+                _log(f"{now_ist:%Y-%m-%d %H:%M:%S %z} cpr(bhavcopy): hits={cpr_result['hits']} "
+                     f"messages_sent={cpr_result.get('messages_sent', 0)}")
+            else:
+                _log(f"{now_ist:%Y-%m-%d %H:%M:%S %z} cpr(bhavcopy): skipped ({cpr_result.get('reason', 'n/a')})")
+            return
+
         if not _is_eligible_window(now_ist):
             _log(f"{now_ist:%Y-%m-%d %H:%M:%S %z} SKIPPED (outside eligible window)")
             return
@@ -114,11 +125,6 @@ def main():
         else:
             parts.append(f"digest: skipped ({digest.get('reason', 'n/a')})")
 
-        cpr_result = cpr_alert.run_cycle(now_ist, send_alerts=True)
-        if cpr_result["ran"]:
-            parts.append(f"cpr: hits={cpr_result['hits']} messages_sent={cpr_result.get('messages_sent', 0)}")
-        else:
-            parts.append(f"cpr: skipped ({cpr_result.get('reason', 'n/a')})")
 
         if _is_post_close_window(now_ist):
             for strat in paper_trading.DAILY_BAR_STRATEGIES:

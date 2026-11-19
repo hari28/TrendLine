@@ -51,6 +51,7 @@ import cpr
 import news
 import structure
 import fo_universe
+import nse_bhavcopy
 import telegram_bot
 import backtest
 import cpr_ema_backtest
@@ -1718,14 +1719,15 @@ with tab_cpr:
         "Central Pivot Range, computed from each stock's most recently completed daily session "
         "(High/Low/Close) and projected for the next session. A narrow CPR (tight TC-BC band) is "
         "read by CPR traders as compressed volatility -- a higher-probability breakout setup -- "
-        "while a wide CPR suggests a more range-bound day. Data: Yahoo Finance (NSE), same feed "
-        "and cache as the rest of this app. This is a screening tool, not a trade signal by itself."
+        "while a wide CPR suggests a more range-bound day. Data: NSE Full Bhavcopy & Security Deliverable "
+        "file (downloaded automatically after 6:30 PM IST). This is a screening tool, not a trade signal by itself."
     )
     st.caption("Narrow: ≤0.5% · Normal: ≤1% · Wide: >1%")
 
     c1, c2, c3 = st.columns([2, 2, 2])
     with c1:
-        cpr_universe = st.selectbox("Universe", UNIVERSE_OPTIONS, index=0, key="cpr_universe")
+        cpr_universe = "NSE Bhavcopy"
+        st.write("Universe: **NSE Bhavcopy (all EQ)**")
     with c2:
         cpr_width_lt = st.number_input(
             "Width % less than", min_value=0.0, max_value=10.0, value=0.05, step=0.01,
@@ -1741,7 +1743,7 @@ with tab_cpr:
     with c4:
         cpr_search = st.text_input("Search stock", value="", key="cpr_search")
     with c5:
-        cpr_fo_only = st.checkbox("F&O Stocks Only", value=False, key="cpr_fo_only")
+        cpr_fo_only = st.toggle("F&O Stocks Only (ON = F&O only, OFF = all stocks)", value=False, key="cpr_fo_only")
     with c6:
         cpr_force_refresh = st.checkbox("Force-refresh price history", value=False, key="cpr_force_refresh")
 
@@ -1754,40 +1756,18 @@ with tab_cpr:
     cpr_run = st.button("Run CPR scan", type="primary", key="cpr_run")
 
     if cpr_run:
-        cpr_segments = UNIVERSES if cpr_universe == ALL_UNIVERSE_LABEL else [cpr_universe]
-        cpr_symbols_df = get_all_symbols(cpr_segments)
-
-        if cpr_fo_only and cpr_universe == INDEX_UNIVERSE_LABEL:
-            st.info(
-                "\"F&O Stocks Only\" filters to individual-stock derivatives, which don't include "
-                "index derivatives like NIFTY/BANK NIFTY (a separate NSE segment) — so it can't "
-                "apply to the Indices universe. Showing all indices instead."
-            )
-            st.write(f"Scanning {len(cpr_symbols_df)} symbols in {cpr_universe}...")
-        elif cpr_fo_only:
-            try:
-                fo_symbols = fo_universe.get_fo_symbols()
-                cpr_symbols_df = cpr_symbols_df[cpr_symbols_df["Symbol"].isin(fo_symbols)]
-                st.write(f"Scanning {len(cpr_symbols_df)} F&O-eligible symbols "
-                         f"(of {len(fo_symbols)} total F&O stocks) in {cpr_universe}...")
-            except Exception as e:
-                st.error(f"Couldn't load the F&O underlying list ({e}) — scanning full universe instead.")
-                st.write(f"Scanning {len(cpr_symbols_df)} symbols in {cpr_universe}...")
-        else:
-            st.write(f"Scanning {len(cpr_symbols_df)} symbols in {cpr_universe}...")
-
-        cpr_progress = st.progress(0.0)
-        cpr_status = st.empty()
         cpr_start = time.time()
-
-        def _cpr_cb(i, total, symbol):
-            cpr_progress.progress((i + 1) / total)
-            cpr_status.text(f"[{i+1}/{total}] {symbol}")
-
-        cpr_results = cpr.scan_universe_cpr(cpr_symbols_df[["Symbol", "Segment"]], progress_cb=_cpr_cb,
-                                             force_refresh=cpr_force_refresh)
+        cpr_symbols_df = pd.DataFrame(columns=["Symbol", "Segment"])
+        with st.spinner("Loading NSE Bhavcopy..."):
+            try:
+                cpr_results = nse_bhavcopy.scan_bhavcopy_cpr(fo_only=cpr_fo_only)
+            except Exception as e:
+                st.error(f"Bhavcopy load failed: {e}")
+                cpr_results = pd.DataFrame()
+        cpr_symbols_df = cpr_results[["Symbol", "Segment"]] if not cpr_results.empty else cpr_symbols_df
+        cpr_status = st.empty()
         cpr_elapsed = time.time() - cpr_start
-        cpr_status.text(f"Done in {cpr_elapsed:.0f}s — {len(cpr_results)}/{len(cpr_symbols_df)} symbols had usable data.")
+        cpr_status.text(f"Done in {cpr_elapsed:.0f}s — {len(cpr_results)} NSE EQ stocks (Bhavcopy).")
 
         st.session_state["cpr_results"] = cpr_results
         st.session_state["cpr_names"] = (
@@ -1795,8 +1775,8 @@ with tab_cpr:
             if "Company Name" in cpr_symbols_df.columns else {}
         )
         st.session_state["cpr_scanned_at"] = pd.Timestamp.now()
-        st.session_state["cpr_scanned_universe"] = cpr_universe
-        st.session_state["cpr_scanned_fo_only"] = cpr_fo_only and cpr_universe != INDEX_UNIVERSE_LABEL
+        st.session_state["cpr_scanned_universe"] = "NSE Bhavcopy"
+        st.session_state["cpr_scanned_fo_only"] = cpr_fo_only
 
     cpr_results = st.session_state.get("cpr_results")
     cpr_narrow_records = []

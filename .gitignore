@@ -18,3 +18,4 @@ data/cpr_state.json
 data/paper_trading/
 *.key
 *.key.pub
+data/bhavcopy/
