@@ -48,21 +48,22 @@ fi
 
 # --- systemd units (fill placeholders, install, enable) ---
 echo "==> installing systemd units"
-for unit in trendline.service trendline-alerts.service trendline-alerts.timer; do
+for unit in trendline.service trendline-alerts.service trendline-alerts.timer trendline-morning.service trendline-morning.timer; do
     sed -e "s|__APP_DIR__|$APP_DIR|g" \
         -e "s|__PORT__|$PORT|g" \
         -e "s|__USER__|$RUN_USER|g" \
         "$UNIT_SRC/$unit" | sudo tee "/etc/systemd/system/$unit" >/dev/null
 done
 sudo systemctl daemon-reload
-sudo systemctl enable trendline.service trendline-alerts.timer >/dev/null 2>&1
+sudo systemctl enable trendline.service trendline-alerts.timer trendline-morning.timer >/dev/null 2>&1
 sudo systemctl restart trendline.service
 sudo systemctl start trendline-alerts.timer
+sudo systemctl start trendline-morning.timer
 
 # --- report ---
 sleep 3
 echo
 systemctl --no-pager --lines=0 status trendline.service | sed -n '1,4p'
-systemctl --no-pager list-timers trendline-alerts.timer | sed -n '1,2p'
+systemctl --no-pager list-timers trendline-alerts.timer trendline-morning.timer | sed -n '1,3p'
 echo
 echo "==> done. App: http://$(curl -s -m 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}'):$PORT"

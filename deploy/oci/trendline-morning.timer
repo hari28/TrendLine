@@ -1,0 +1,15 @@
+# Fires the 08:50 IST morning Narrow CPR Telegram message, Mon-Fri.
+# OnCalendar is evaluated in the VM's system clock (UTC): 03:20 UTC = 08:50 IST (UTC+5:30).
+# Persistent=true: if the VM was down at 03:20, run on boot; check_watchlist.py --morning
+# itself only sends on weekdays between 08:50 and 11:00 IST, and only once per day.
+[Unit]
+Description=TrendLine morning Narrow CPR Telegram message (08:50 IST, Mon-Fri)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 03:20:00
+AccuracySec=10s
+Persistent=true
+Unit=trendline-morning.service
+
+[Install]
+WantedBy=timers.target

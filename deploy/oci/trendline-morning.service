@@ -1,0 +1,17 @@
+# One morning message: today's Narrow CPR watchlist (see cpr_alert.run_morning).
+# Triggered by trendline-morning.timer. Installed by deploy/oci/setup.sh, which
+# substitutes the __PLACEHOLDERS__.
+[Unit]
+Description=TrendLine morning Narrow CPR Telegram message
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__APP_DIR__
+Environment=TZ=Asia/Kolkata
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-__APP_DIR__/.env
+ExecStart=__APP_DIR__/venv/bin/python check_watchlist.py --morning
+TimeoutStartSec=10min

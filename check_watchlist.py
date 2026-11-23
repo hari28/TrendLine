@@ -48,6 +48,14 @@ IST = ZoneInfo("Asia/Kolkata")
 MARKET_OPEN, MARKET_CLOSE = dtime(9, 15), dtime(15, 30)
 DAILY_DIGEST_END = dtime(16, 0)
 
+# Telegram policy: exactly TWO automatic messages per trading day, both from cpr_alert.py --
+#   * 08:50 IST  morning Narrow CPR watchlist   (python check_watchlist.py --morning, via trendline-morning.timer)
+#   * after the NSE Bhavcopy CSV is published (polled from 18:30 IST) -- evening Narrow CPR alert
+# The intraday digest / ad-hoc scan alerts below stay silent unless you explicitly opt back in
+# with TRENDLINE_INTRADAY_TELEGRAM=1 in .env. (The digest still runs and keeps logging calls to
+# call_log for the Call Performance tab -- it just doesn't message Telegram.)
+INTRADAY_TELEGRAM = os.getenv("TRENDLINE_INTRADAY_TELEGRAM", "0") == "1"
+
 
 def _is_trading_hours(now_ist: datetime) -> bool:
     if now_ist.weekday() >= 5:  # Sat=5, Sun=6
@@ -79,18 +87,24 @@ def _log(line: str) -> None:
         f.write(line + "\n")
 
 
-def main():
+def main(morning: bool = False):
     now_ist = datetime.now(IST)
 
     os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
     lock_file = open(LOCK_PATH, "w")
     try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # The morning message must not be skipped just because a cycle is running: wait for the lock.
+        fcntl.flock(lock_file, fcntl.LOCK_EX if morning else (fcntl.LOCK_EX | fcntl.LOCK_NB))
     except BlockingIOError:
         _log(f"{now_ist:%Y-%m-%d %H:%M:%S %z} SKIPPED (previous run still in progress)")
         return
 
     try:
+        if morning:
+            r = cpr_alert.run_morning(now_ist, send_alerts=True)
+            _log(f"{now_ist:%Y-%m-%d %H:%M:%S %z} morning(cpr): {r}")
+            return
+
         # Narrow CPR runs from NSE Bhavcopy, published after ~18:00 IST, so it has its
         # own window (18:30 IST onward) outside the market-hours window.
         if now_ist.weekday() < 5 and now_ist.time() >= cpr_alert.MARKET_CLOSE:
@@ -108,7 +122,9 @@ def main():
 
         parts = [f"{now_ist:%Y-%m-%d %H:%M:%S %z}"]
 
-        if _is_trading_hours(now_ist):
+        if not INTRADAY_TELEGRAM:
+            parts.append("screener_alert: skipped (intraday Telegram disabled)")
+        elif _is_trading_hours(now_ist):
             screener_alert_result = screener_alert.run_cycle(now_ist)
             if screener_alert_result["ran"]:
                 parts.append(f"screener_alert: sent={screener_alert_result['sent']}")
@@ -117,7 +133,7 @@ def main():
         else:
             parts.append("screener_alert: skipped (outside trading hours)")
 
-        digest = universe_digest.run_cycle(now_ist, send_alerts=True)
+        digest = universe_digest.run_cycle(now_ist, send_alerts=INTRADAY_TELEGRAM)
         if digest["ran"]:
             b = digest["buckets"]
             parts.append(f"digest: hits={digest['hits']} messages_sent={digest.get('messages_sent', 0)} "
@@ -147,4 +163,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(morning="--morning" in sys.argv[1:])
